@@ -86,13 +86,17 @@ public final class AggregateMutationExecutor {
 
     /**
      * FULL_SYNC means the supplied child mutation list is the complete desired child set.
-     * Each child mutation represents one row, so its own values carry the keep-set primary key.
+     * Mutations are grouped by child module so multiple rows of one child module share one
+     * keep-set and are deleted atomically as a group.
      */
     private int removeOrphans(DSLContext dsl, SysModule parent, Object parentKey,
                               List<AggregateMutation> children) {
+        Map<Long, List<AggregateMutation>> byModule = new LinkedHashMap<>();
+        for (AggregateMutation child : children) byModule.computeIfAbsent(child.moduleId(), ignored -> new ArrayList<>()).add(child);
+
         int count = 0;
-        for (AggregateMutation childMutation : children) {
-            SysModule child = registry.module(childMutation.moduleId());
+        for (List<AggregateMutation> mutations : byModule.values()) {
+            SysModule child = registry.module(mutations.get(0).moduleId());
             if (child.primaryTable().equals(parent.primaryTable())) continue;
             SysTableRelation rel = relations.relationOf(parent.primaryTable(), child.primaryTable());
             boolean parentIsMain = rel.mainTable().equals(parent.primaryTable());
@@ -101,12 +105,14 @@ public final class AggregateMutationExecutor {
             if (pk == null) continue;
 
             Set<Object> keep = new HashSet<>();
-            Object childKey = values(child, childMutation.values()).get(pk);
-            if (childKey != null) keep.add(childKey);
+            for (AggregateMutation mutation : mutations) {
+                if (mutation.operation() == AggregateMutation.Operation.DELETE) continue;
+                Object childKey = values(child, mutation.values()).get(pk);
+                if (childKey != null) keep.add(childKey);
+            }
 
             Condition condition = field(fk).eq(parentKey);
             if (!keep.isEmpty()) condition = condition.and(field(pk).notIn(keep));
-            else condition = condition;
             count += dsl.deleteFrom(table(name(child.primaryTable()))).where(condition).execute();
         }
         return count;
@@ -114,11 +120,11 @@ public final class AggregateMutationExecutor {
 
     private Object generatedKey(DSLContext dsl, Table<?> table, Map<Field<Object>, Object> values, SysModule module) {
         SysModuleField pk = primaryKeyField(module);
-        if (pk == null || values.containsKey(field(pk))) {
+        Field<Object> keyField = pk == null ? null : field(pk);
+        if (pk == null || values.containsKey(keyField)) {
             dsl.insertInto(table).set(values).execute();
-            return pk == null ? null : values.get(field(pk));
+            return pk == null ? null : values.get(keyField);
         }
-        Field<Object> keyField = field(pk);
         return dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);
     }
 
