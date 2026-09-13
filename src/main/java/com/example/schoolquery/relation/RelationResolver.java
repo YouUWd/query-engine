@@ -44,6 +44,11 @@ public class RelationResolver {
      * to a requested secondary table. Traversal is strictly limited to tables configured on that
      * module, so unrelated physical tables can never be introduced merely because a global
      * table graph happens to connect them.
+     *
+     * <p>Every returned relation is oriented in traversal direction: its {@code mainTable()} is
+     * the table reached from the previous path node and its {@code joinTable()} is the next node.
+     * This keeps the physical join plan independent of the declaration direction in
+     * {@code sys_table_relation}.</p>
      */
     public List<SysTableRelation> relationPathOfModule(long ownerModuleId, String otherTable) {
         SysModule owner = registry.module(ownerModuleId);
@@ -66,7 +71,7 @@ public class RelationResolver {
                 String next = adjacentTable(relation, current.table());
                 if (next == null || !allowedTables.contains(next)) continue;
                 List<SysTableRelation> nextPath = new ArrayList<>(current.path());
-                nextPath.add(relation);
+                nextPath.add(orient(relation, current.table(), next));
                 Integer known = distance.get(next);
                 if (known == null) {
                     distance.put(next, nextDistance);
@@ -85,6 +90,15 @@ public class RelationResolver {
                     + " 与关联表 " + otherTable + " 在该模块配置的表集合内没有唯一关系路径");
         }
         return found.path();
+    }
+
+    private SysTableRelation orient(SysTableRelation relation, String currentTable, String nextTable) {
+        if (relation.mainTable().equals(currentTable) && relation.joinTable().equals(nextTable)) return relation;
+        if (relation.joinTable().equals(currentTable) && relation.mainTable().equals(nextTable)) {
+            return new SysTableRelation(relation.id(), relation.joinTable(), relation.joinField(),
+                    relation.mainTable(), relation.mainField(), relation.type());
+        }
+        throw new IllegalStateException("物理关系无法按路径方向定向：" + currentTable + " -> " + nextTable);
     }
 
     /** Compatibility API for direct physical relation callers. */
