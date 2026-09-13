@@ -81,7 +81,8 @@ public class FieldDrivenQueryService {
     private SelectConditionStep<Record> buildSelect(DSLContext dsl, Map<Long, List<SysModuleField>> requested,
                                                       FlatGroup tree, Condition rootCondition,
                                                       PermissionContext permissionContext) {
-        return sqlBuilder.build(dsl, tree, requested, rootCondition, permissionContext);
+        FlatGroup resolvedTree = treeBuilder.resolveTableJoins(tree, requested);
+        return sqlBuilder.build(dsl, resolvedTree, requested, rootCondition, permissionContext);
     }
 
     private Map<Long, List<SysModuleField>> resolveByModule(List<Long> fieldIds) {
