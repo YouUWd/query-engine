@@ -48,12 +48,12 @@ public final class QueryPlanExecutor {
         FlatGroup tree = treeBuilder.buildFromRoot(plan.rootModuleId(), requested.keySet());
         // Resolve physical table joins once, after logical fields have been resolved.
         // The renderer receives this completed tree and never infers joins from table names.
-        tree = treeBuilder.resolveTableJoins(tree, requested);
+        final FlatGroup resolvedTree = treeBuilder.resolveTableJoins(tree, requested);
         Condition rootCondition = conditionCompiler.compile(dsl, plan.rootModuleId(), plan.filterExpression());
         Map<Long, Condition> localConditions = buildLocalConditions(dsl, plan.rootModuleId(), plan.filterExpression());
 
-        var select = sqlBuilder.build(dsl, tree, requested, rootCondition, null, Map.of(), localConditions);
-        List<SortField<?>> orderBy = buildOrderBy(plan, tree);
+        var select = sqlBuilder.build(dsl, resolvedTree, requested, rootCondition, null, Map.of(), localConditions);
+        List<SortField<?>> orderBy = buildOrderBy(plan, resolvedTree);
         Result<Record> rows;
         if (orderBy.isEmpty()) {
             rows = plan.pagination() == null ? select.fetch()
@@ -65,7 +65,7 @@ public final class QueryPlanExecutor {
         }
 
         List<Map<String, Object>> rendered = rows.stream()
-                .map(r -> renderer.renderRecord(plan.rootModuleId(), tree, r, requested, aliases))
+                .map(r -> renderer.renderRecord(plan.rootModuleId(), resolvedTree, r, requested, aliases))
                 .toList();
         return new ModuleQueryResult(metadata(plan), rendered);
     }
