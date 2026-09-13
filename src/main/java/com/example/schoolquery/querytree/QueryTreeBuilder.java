@@ -31,14 +31,16 @@ public class QueryTreeBuilder {
                 throw new IllegalArgumentException("字段所属模块 " + mid + " 不是根模块 " + rootModuleId + " 的子孙（或自身）");
             }
         }
-        return buildGroup(rootModuleId, registry.module(rootModuleId), computeBackbone(rootModuleId, touchedModuleIds));
+        FlatGroup tree = buildGroup(rootModuleId, registry.module(rootModuleId), computeBackbone(rootModuleId, touchedModuleIds));
+        return resolveTableJoins(tree, fieldsForModules(tree.mergedModuleIds()));
     }
 
     public FlatGroup buildAutoRoot(Set<Long> touchedModuleIds) {
         if (touchedModuleIds.isEmpty()) throw new IllegalArgumentException("字段列表为空，无法推断查询根节点");
         long lca = findLowestCommonAncestor(touchedModuleIds);
         long root = registry.module(lca).isVirtual() ? registry.nearestRealAncestor(lca).id() : lca;
-        return buildGroup(root, registry.module(root), computeBackbone(root, touchedModuleIds));
+        FlatGroup tree = buildGroup(root, registry.module(root), computeBackbone(root, touchedModuleIds));
+        return resolveTableJoins(tree, fieldsForModules(tree.mergedModuleIds()));
     }
 
     /**
@@ -105,6 +107,16 @@ public class QueryTreeBuilder {
                 && left.otherTable().equals(right.otherTable())
                 && left.primaryColumn().equals(right.primaryColumn())
                 && left.otherColumn().equals(right.otherColumn());
+    }
+
+    private Map<Long, List<SysModuleField>> fieldsForModules(List<Long> moduleIds) {
+        Map<Long, List<SysModuleField>> fields = new LinkedHashMap<>();
+        for (long moduleId : moduleIds) {
+            fields.put(moduleId, registry.fieldsGroupedByTable(moduleId).values().stream()
+                    .flatMap(Collection::stream)
+                    .toList());
+        }
+        return fields;
     }
 
     private long findLowestCommonAncestor(Set<Long> ids) {
