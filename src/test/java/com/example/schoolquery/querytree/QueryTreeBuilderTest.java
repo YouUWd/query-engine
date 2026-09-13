@@ -3,6 +3,7 @@ package com.example.schoolquery.querytree;
 import com.example.schoolquery.TestDatabases;
 import com.example.schoolquery.metadata.MetadataLoader;
 import com.example.schoolquery.metadata.MetadataRegistry;
+import com.example.schoolquery.model.SysTableRelation;
 import com.example.schoolquery.relation.RelationResolver;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
