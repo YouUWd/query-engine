@@ -11,11 +11,7 @@ import org.jooq.Table;
 import java.util.*;
 import static org.jooq.impl.DSL.*;
 
-/**
- * Converts the logical filter tree into a root Condition. Descendant 1:N
- * predicates become correlated EXISTS chains. Relation resolution is logical
- * (moduleId -> moduleId), never table-name based.
- */
+/** Converts logical filters to root SQL conditions; descendant 1:N predicates become correlated EXISTS chains. */
 public final class PlanConditionCompiler {
     private final MetadataRegistry registry;
     private final LogicalRelationResolver relations;
@@ -25,19 +21,15 @@ public final class PlanConditionCompiler {
         this.relations = new LogicalRelationResolver(registry);
     }
 
-    /** Compatibility constructor retained for callers that already hold a registry. */
-    public PlanConditionCompiler(MetadataRegistry registry, Object ignoredRelationResolver) {
-        this(registry);
-    }
+    /** Compatibility constructor for old callers; relation resolution now belongs to module metadata. */
+    public PlanConditionCompiler(MetadataRegistry registry, Object ignoredRelationResolver) { this(registry); }
 
     public Condition compile(DSLContext dsl, long rootModuleId, FilterExpressionPlan expression) {
         return expression == null ? trueCondition() : compileExpression(dsl, rootModuleId, expression);
     }
 
     private Condition compileExpression(DSLContext dsl, long rootId, FilterExpressionPlan expression) {
-        if (expression instanceof FilterExpressionPlan.Predicate p) {
-            return compilePredicate(dsl, rootId, p.filter());
-        }
+        if (expression instanceof FilterExpressionPlan.Predicate p) return compilePredicate(dsl, rootId, p.filter());
         if (expression instanceof FilterExpressionPlan.And a) {
             Condition result = trueCondition();
             for (FilterExpressionPlan child : a.children()) result = result.and(compileExpression(dsl, rootId, child));
@@ -55,9 +47,7 @@ public final class PlanConditionCompiler {
         SysModuleField fieldMeta = registry.field(filter.field().fieldId());
         SysModule owner = registry.module(fieldMeta.moduleId());
         SysModule root = registry.module(rootId);
-        if (owner.id() == root.id() || samePhysicalEntity(root, owner)) {
-            return predicateCondition(field(fieldMeta), filter);
-        }
+        if (owner.id() == root.id() || samePhysicalEntity(root, owner)) return predicateCondition(field(fieldMeta), filter);
         return descendantExists(dsl, root, owner, fieldMeta, filter);
     }
 
@@ -70,7 +60,6 @@ public final class PlanConditionCompiler {
         Table<?> leafTable = table(name(leaf.primaryTable()));
         Condition inner = predicateCondition(field(leafTable, fieldMeta.columnName()), filter);
         SysModule child = leaf;
-
         for (int i = path.size() - 2; i >= 0; i--) {
             SysModule parent = path.get(i);
             ResolvedRelationPlan relation = relations.resolve(parent.id(), child.id());
@@ -96,11 +85,11 @@ public final class PlanConditionCompiler {
         for (long id : chain) {
             SysModule module = registry.module(id);
             if (module.id() == root.id()) started = true;
-            if (started && !module.isVirtual()) result.add(module);
+            if (!started || module.isVirtual()) continue;
+            // Same-entity module edges are semantic/UI edges, not SQL correlation edges.
+            if (result.isEmpty() || !result.get(result.size() - 1).primaryTable().equals(module.primaryTable())) result.add(module);
         }
-        if (result.isEmpty() || result.get(0).id() != root.id()) {
-            throw new IllegalArgumentException("field module is outside root module");
-        }
+        if (result.isEmpty() || result.get(0).id() != root.id()) throw new IllegalArgumentException("field module is outside root module");
         return result;
     }
 
@@ -110,33 +99,15 @@ public final class PlanConditionCompiler {
 
     private Condition predicateCondition(Field<Object> field, FilterPlan filter) {
         return switch (filter.operator()) {
-            case EQ -> field.eq(filter.value());
-            case NE -> field.ne(filter.value());
-            case GT -> field.gt(filter.value());
-            case GE -> field.ge(filter.value());
-            case LT -> field.lt(filter.value());
-            case LE -> field.le(filter.value());
-            case LIKE -> field.like(String.valueOf(filter.value()));
-            case IN -> field.in(asList(filter.value()));
-            case BETWEEN -> {
-                List<?> values = asList(filter.value());
-                if (values.size() != 2) throw new IllegalArgumentException("BETWEEN requires exactly two values");
-                yield field.between(values.get(0), values.get(1));
-            }
-            case IS_NULL -> field.isNull();
-            case IS_NOT_NULL -> field.isNotNull();
+            case EQ -> field.eq(filter.value()); case NE -> field.ne(filter.value()); case GT -> field.gt(filter.value());
+            case GE -> field.ge(filter.value()); case LT -> field.lt(filter.value()); case LE -> field.le(filter.value());
+            case LIKE -> field.like(String.valueOf(filter.value())); case IN -> field.in(asList(filter.value()));
+            case BETWEEN -> { List<?> v = asList(filter.value()); if (v.size() != 2) throw new IllegalArgumentException("BETWEEN requires exactly two values"); yield field.between(v.get(0), v.get(1)); }
+            case IS_NULL -> field.isNull(); case IS_NOT_NULL -> field.isNotNull();
         };
     }
 
-    private List<?> asList(Object value) {
-        return value instanceof Collection<?> c ? List.copyOf(c) : List.of(value);
-    }
-
-    private Field<Object> field(SysModuleField metadata) {
-        return field(name(metadata.tableName(), metadata.columnName()), Object.class);
-    }
-
-    private Field<Object> field(Table<?> table, String column) {
-        return field(name(table.getName(), column), Object.class);
-    }
+    private List<?> asList(Object value) { return value instanceof Collection<?> c ? List.copyOf(c) : List.of(value); }
+    private Field<Object> field(SysModuleField f) { return field(name(f.tableName(), f.columnName()), Object.class); }
+    private Field<Object> field(Table<?> t, String column) { return field(name(t.getName(), column), Object.class); }
 }
