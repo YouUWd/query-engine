@@ -14,36 +14,181 @@ import java.util.*;
 public final class ModuleQueryCompiler {
     private final MetadataRegistry registry;
     private final ModuleSqlParser parser = new ModuleSqlParser();
-    public ModuleQueryCompiler(MetadataRegistry registry){this.registry=Objects.requireNonNull(registry);}
 
-    public QueryPlan compile(String sql){
-        ModuleSqlAst ast=parser.parseSelect(sql); SysModule root=registry.module(ast.rootModuleToken());
-        List<LogicalFieldRef> projections=new ArrayList<>();
-        for(String t:ast.projectionTokens()){String x=stripAlias(t);if("*".equals(x))projections.addAll(allVisible(root.id()));else projections.add(resolve(root.id(),x));}
-        List<FilterPlan> flat=new ArrayList<>(); if(ast.where()!=null)compileFilter(root.id(),ast.where(),flat);
-        List<SortPlan.SortItem> sorts=new ArrayList<>(); for(ModuleSqlAst.SortSpec s:ast.sorts())sorts.add(new SortPlan.SortItem(resolve(root.id(),s.expression()),s.ascending()?SortPlan.Direction.ASC:SortPlan.Direction.DESC));
-        PaginationPlan page=ast.limit()==null?null:new PaginationPlan((ast.offset()==null?0:ast.offset())/ast.limit()+1,ast.limit());
-        return new QueryPlan(root.id(),projections,List.of(),flat,new SortPlan(sorts),page);
+    public ModuleQueryCompiler(MetadataRegistry registry) {
+        this.registry = Objects.requireNonNull(registry);
     }
-    private FilterExpressionPlan compileFilter(long root,Expression e,List<FilterPlan> flat){
-        if(e instanceof AndExpression a)return new FilterExpressionPlan.And(List.of(compileFilter(root,a.getLeftExpression(),flat),compileFilter(root,a.getRightExpression(),flat)));
-        if(e instanceof OrExpression o)return new FilterExpressionPlan.Or(List.of(compileFilter(root,o.getLeftExpression(),flat),compileFilter(root,o.getRightExpression(),flat)));
-        FilterPlan p=predicate(root,e);flat.add(p);return new FilterExpressionPlan.Predicate(p);
+
+    public QueryPlan compile(String sql) {
+        ModuleSqlAst ast = parser.parseSelect(sql);
+        SysModule root = registry.module(ast.rootModuleToken());
+
+        List<LogicalFieldRef> projections = new ArrayList<>();
+        for (String token : ast.projectionTokens()) {
+            String expression = stripAlias(token);
+            if ("*".equals(expression)) {
+                projections.addAll(allVisible(root.id()));
+            } else {
+                projections.add(resolve(root.id(), expression));
+            }
+        }
+
+        List<FilterPlan> flat = new ArrayList<>();
+        FilterExpressionPlan filterExpression = ast.where() == null
+                ? null
+                : compileFilter(root.id(), ast.where(), flat);
+
+        List<SortPlan.SortItem> sorts = new ArrayList<>();
+        for (ModuleSqlAst.SortSpec sort : ast.sorts()) {
+            sorts.add(new SortPlan.SortItem(
+                    resolve(root.id(), sort.expression()),
+                    sort.ascending() ? SortPlan.Direction.ASC : SortPlan.Direction.DESC));
+        }
+
+        PaginationPlan page = ast.limit() == null
+                ? null
+                : new PaginationPlan(
+                        (ast.offset() == null ? 0 : ast.offset()) / ast.limit() + 1,
+                        ast.limit());
+
+        return new QueryPlan(root.id(), projections, List.of(), flat,
+                filterExpression, new SortPlan(sorts), page);
     }
-    private FilterPlan predicate(long root,Expression e){
-        if(e instanceof IsNullExpression x)return new FilterPlan(resolve(root,x.getLeftExpression().toString()),x.isNot()?FilterPlan.Operator.IS_NOT_NULL:FilterPlan.Operator.IS_NULL,null);
-        if(e instanceof Between x)return new FilterPlan(resolve(root,x.getLeftExpression().toString()),FilterPlan.Operator.BETWEEN,List.of(value(x.getBetweenExpressionStart()),value(x.getBetweenExpressionEnd())));
-        if(e instanceof InExpression x)return new FilterPlan(resolve(root,x.getLeftExpression().toString()),FilterPlan.Operator.IN,parseList(x.getRightItemsList()==null?"":x.getRightItemsList().toString()));
-        if(e instanceof BinaryExpression x)return new FilterPlan(resolve(root,x.getLeftExpression().toString()),operator(x),value(x.getRightExpression()));
-        throw new IllegalArgumentException("Unsupported WHERE expression: "+e);
+
+    private FilterExpressionPlan compileFilter(long root, Expression expression, List<FilterPlan> flat) {
+        if (expression instanceof AndExpression and) {
+            return new FilterExpressionPlan.And(List.of(
+                    compileFilter(root, and.getLeftExpression(), flat),
+                    compileFilter(root, and.getRightExpression(), flat)));
+        }
+        if (expression instanceof OrExpression or) {
+            return new FilterExpressionPlan.Or(List.of(
+                    compileFilter(root, or.getLeftExpression(), flat),
+                    compileFilter(root, or.getRightExpression(), flat)));
+        }
+
+        FilterPlan predicate = predicate(root, expression);
+        flat.add(predicate);
+        return new FilterExpressionPlan.Predicate(predicate);
     }
-    private FilterPlan.Operator operator(BinaryExpression x){if(x instanceof EqualsTo)return FilterPlan.Operator.EQ;if(x instanceof NotEqualsTo)return FilterPlan.Operator.NE;if(x instanceof GreaterThan)return FilterPlan.Operator.GT;if(x instanceof GreaterThanEquals)return FilterPlan.Operator.GE;if(x instanceof MinorThan)return FilterPlan.Operator.LT;if(x instanceof MinorThanEquals)return FilterPlan.Operator.LE;if(x instanceof LikeExpression)return FilterPlan.Operator.LIKE;throw new IllegalArgumentException("Unsupported operator: "+x);}
-    private Object value(Expression e){if(e instanceof LongValue x)return x.getValue();if(e instanceof StringValue x)return x.getValue();if(e instanceof BooleanValue x)return x.getValue();if(e instanceof NullValue)return null;return literal(e.toString());}
-    private List<Object> parseList(String s){String x=s.replace("(","").replace(")","").trim();if(x.isEmpty())return List.of();return Arrays.stream(x.split(",")).map(String::trim).map(this::literal).toList();}
-    private Object literal(String s){String x=s.trim();if(x.startsWith("'")&&x.endsWith("'"))return x.substring(1,x.length()-1).replace("''", "'");try{return Long.parseLong(x);}catch(Exception ignored){}try{return Double.parseDouble(x);}catch(Exception ignored){}return x;}
-    private LogicalFieldRef resolve(long root,String raw){String x=raw.trim().replace("`","");if(x.matches("f\\d+"))return ref(root,Long.parseLong(x.substring(1)));if(x.matches("\\d+"))return ref(root,Long.parseLong(x));String[] p=x.split("\\.");List<SysModuleField> c=new ArrayList<>();for(SysModule m:registry.allModules())if(registry.ancestorChain(m.id()).contains(root))for(List<SysModuleField> fs:registry.fieldsGroupedByTable(m.id()).values())for(SysModuleField f:fs)if(match(f,p))c.add(f);Map<Long,SysModuleField> u=new LinkedHashMap<>();c.forEach(f->u.put(f.id(),f));if(u.size()==1){SysModuleField f=u.values().iterator().next();return new LogicalFieldRef(f.moduleId(),f.id());}if(u.isEmpty())throw new IllegalArgumentException("Unknown field: "+raw);throw new IllegalArgumentException("Ambiguous field: "+raw+"; use fieldId or module.table.column");}
-    private boolean match(SysModuleField f,String[] p){if(p.length==1)return f.columnName().equals(p[0]);if(p.length==2)return f.tableName().equals(p[0])&&f.columnName().equals(p[1]);if(p.length==3)return f.tableName().equals(p[1])&&f.columnName().equals(p[2]);return false;}
-    private LogicalFieldRef ref(long root,long id){SysModuleField f=registry.field(id);if(!registry.ancestorChain(f.moduleId()).contains(root))throw new IllegalArgumentException("fieldId="+id+" is outside root "+root);return new LogicalFieldRef(f.moduleId(),id);}
-    private List<LogicalFieldRef> allVisible(long root){List<LogicalFieldRef> r=new ArrayList<>();for(SysModule m:registry.allModules())if(registry.ancestorChain(m.id()).contains(root))for(List<SysModuleField> fs:registry.fieldsGroupedByTable(m.id()).values())for(SysModuleField f:fs)r.add(new LogicalFieldRef(f.moduleId(),f.id()));return r;}
-    private String stripAlias(String s){String x=s.trim();int i=x.toLowerCase(Locale.ROOT).lastIndexOf(" as ");return i>0?x.substring(0,i).trim():x;}
+
+    private FilterPlan predicate(long root, Expression expression) {
+        if (expression instanceof IsNullExpression x) {
+            return new FilterPlan(resolve(root, x.getLeftExpression().toString()),
+                    x.isNot() ? FilterPlan.Operator.IS_NOT_NULL : FilterPlan.Operator.IS_NULL, null);
+        }
+        if (expression instanceof Between x) {
+            return new FilterPlan(resolve(root, x.getLeftExpression().toString()),
+                    FilterPlan.Operator.BETWEEN,
+                    List.of(value(x.getBetweenExpressionStart()), value(x.getBetweenExpressionEnd())));
+        }
+        if (expression instanceof InExpression x) {
+            String items = x.getRightItemsList() == null ? "" : x.getRightItemsList().toString();
+            return new FilterPlan(resolve(root, x.getLeftExpression().toString()),
+                    FilterPlan.Operator.IN, parseList(items));
+        }
+        if (expression instanceof BinaryExpression x) {
+            return new FilterPlan(resolve(root, x.getLeftExpression().toString()),
+                    operator(x), value(x.getRightExpression()));
+        }
+        throw new IllegalArgumentException("Unsupported WHERE expression: " + expression);
+    }
+
+    private FilterPlan.Operator operator(BinaryExpression expression) {
+        if (expression instanceof EqualsTo) return FilterPlan.Operator.EQ;
+        if (expression instanceof NotEqualsTo) return FilterPlan.Operator.NE;
+        if (expression instanceof GreaterThan) return FilterPlan.Operator.GT;
+        if (expression instanceof GreaterThanEquals) return FilterPlan.Operator.GE;
+        if (expression instanceof MinorThan) return FilterPlan.Operator.LT;
+        if (expression instanceof MinorThanEquals) return FilterPlan.Operator.LE;
+        if (expression instanceof LikeExpression) return FilterPlan.Operator.LIKE;
+        throw new IllegalArgumentException("Unsupported operator: " + expression);
+    }
+
+    private Object value(Expression expression) {
+        if (expression instanceof LongValue x) return x.getValue();
+        if (expression instanceof StringValue x) return x.getValue();
+        if (expression instanceof BooleanValue x) return x.getValue();
+        if (expression instanceof NullValue) return null;
+        return literal(expression.toString());
+    }
+
+    private List<Object> parseList(String value) {
+        String x = value.replace("(", "").replace(")", "").trim();
+        if (x.isEmpty()) return List.of();
+        return Arrays.stream(x.split(","))
+                .map(String::trim)
+                .map(this::literal)
+                .toList();
+    }
+
+    private Object literal(String value) {
+        String x = value.trim();
+        if (x.startsWith("'") && x.endsWith("'")) {
+            return x.substring(1, x.length() - 1).replace("''", "'");
+        }
+        try { return Long.parseLong(x); } catch (Exception ignored) { }
+        try { return Double.parseDouble(x); } catch (Exception ignored) { }
+        return x;
+    }
+
+    private LogicalFieldRef resolve(long root, String raw) {
+        String x = raw.trim().replace("`", "");
+        if (x.matches("f\\d+")) return ref(root, Long.parseLong(x.substring(1)));
+        if (x.matches("\\d+")) return ref(root, Long.parseLong(x));
+
+        String[] parts = x.split("\\.");
+        List<SysModuleField> candidates = new ArrayList<>();
+        for (SysModule module : registry.allModules()) {
+            if (!registry.ancestorChain(module.id()).contains(root)) continue;
+            for (List<SysModuleField> fields : registry.fieldsGroupedByTable(module.id()).values()) {
+                for (SysModuleField field : fields) {
+                    if (match(field, parts)) candidates.add(field);
+                }
+            }
+        }
+
+        Map<Long, SysModuleField> unique = new LinkedHashMap<>();
+        candidates.forEach(field -> unique.put(field.id(), field));
+        if (unique.size() == 1) {
+            SysModuleField field = unique.values().iterator().next();
+            return new LogicalFieldRef(field.moduleId(), field.id());
+        }
+        if (unique.isEmpty()) throw new IllegalArgumentException("Unknown field: " + raw);
+        throw new IllegalArgumentException("Ambiguous field: " + raw + "; use fieldId or module.table.column");
+    }
+
+    private boolean match(SysModuleField field, String[] parts) {
+        if (parts.length == 1) return field.columnName().equals(parts[0]);
+        if (parts.length == 2) return field.tableName().equals(parts[0]) && field.columnName().equals(parts[1]);
+        if (parts.length == 3) return field.tableName().equals(parts[1]) && field.columnName().equals(parts[2]);
+        return false;
+    }
+
+    private LogicalFieldRef ref(long root, long id) {
+        SysModuleField field = registry.field(id);
+        if (!registry.ancestorChain(field.moduleId()).contains(root)) {
+            throw new IllegalArgumentException("fieldId=" + id + " is outside root " + root);
+        }
+        return new LogicalFieldRef(field.moduleId(), id);
+    }
+
+    private List<LogicalFieldRef> allVisible(long root) {
+        List<LogicalFieldRef> result = new ArrayList<>();
+        for (SysModule module : registry.allModules()) {
+            if (!registry.ancestorChain(module.id()).contains(root)) continue;
+            for (List<SysModuleField> fields : registry.fieldsGroupedByTable(module.id()).values()) {
+                for (SysModuleField field : fields) {
+                    result.add(new LogicalFieldRef(field.moduleId(), field.id()));
+                }
+            }
+        }
+        return result;
+    }
+
+    private String stripAlias(String value) {
+        String x = value.trim();
+        int i = x.toLowerCase(Locale.ROOT).lastIndexOf(" as ");
+        return i > 0 ? x.substring(0, i).trim() : x;
+    }
 }
