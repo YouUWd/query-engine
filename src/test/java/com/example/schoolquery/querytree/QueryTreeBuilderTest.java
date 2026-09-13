@@ -12,7 +12,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -118,6 +120,33 @@ class QueryTreeBuilderTest {
     @Test
     void buildAutoRootRejectsEmptyFieldSet() {
         assertThrows(IllegalArgumentException.class, () -> builder.buildAutoRoot(Set.of()));
+    }
+
+    @Test
+    void resolvesInternalTableJoinsFromFieldOwningModuleContext() {
+        // 103 的 primary_table 是 student；该模块同时引用 clazz / student_profile。
+        // JOIN 的方向和字段必须先由“模块 103”这个逻辑上下文确定，再交给 SQL renderer。
+        FlatGroup tree = builder.buildFromRoot(103L, Set.of(103L));
+        Map<Long, java.util.List<com.example.schoolquery.model.SysModuleField>> requested =
+                Map.of(103L, registry.fieldsGroupedByTable(103L).values().stream().flatMap(java.util.Collection::stream).collect(Collectors.toList()));
+
+        FlatGroup resolved = builder.resolveTableJoins(tree, requested);
+
+        assertEquals(2, resolved.tableJoins().size());
+        assertTrue(resolved.tableJoins().stream().anyMatch(j ->
+                j.sourceModuleId() == 103L
+                        && j.targetModuleId() == 103L
+                        && j.primaryTable().equals("student")
+                        && j.otherTable().equals("clazz")
+                        && j.primaryColumn().equals("clazz_id")
+                        && j.otherColumn().equals("id")));
+        assertTrue(resolved.tableJoins().stream().anyMatch(j ->
+                j.sourceModuleId() == 103L
+                        && j.targetModuleId() == 103L
+                        && j.primaryTable().equals("student")
+                        && j.otherTable().equals("student_profile")
+                        && j.primaryColumn().equals("id")
+                        && j.otherColumn().equals("student_id")));
     }
 
     // ============ 虚拟模块（独立的 H2 配置库） ============
