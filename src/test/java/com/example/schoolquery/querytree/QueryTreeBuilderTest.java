@@ -125,7 +125,7 @@ class QueryTreeBuilderTest {
                         && j.primaryColumn().equals("id")
                         && j.otherColumn().equals("clazz_id")));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
-                j.primaryTable().equals("student")
+                j.primaryTable().equals("clazz")
                         && j.otherTable().equals("student_profile")
                         && j.primaryColumn().equals("id")
                         && j.otherColumn().equals("student_id")));
