@@ -25,6 +25,14 @@ public record ResolvedTableJoinPlan(
         this(0L, 0L, primaryTable, otherTable, primaryColumn, otherColumn, List.of());
     }
 
+    /** Compatibility constructor retained for the previous module-id based model. */
+    public ResolvedTableJoinPlan(long sourceModuleId, long targetModuleId,
+                                 String primaryTable, String otherTable,
+                                 String primaryColumn, String otherColumn) {
+        this(sourceModuleId, targetModuleId, primaryTable, otherTable,
+                primaryColumn, otherColumn, List.of());
+    }
+
     /** Preferred constructor for joins resolved from the module tree. */
     public ResolvedTableJoinPlan(long ownerModuleId, List<Long> modulePath,
                                  String primaryTable, String otherTable,
