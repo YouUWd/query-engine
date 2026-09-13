@@ -10,12 +10,9 @@ import java.util.Optional;
 /**
  * 新规则："同一模块内，主表与关联表只能是 1:1 / N:1；1:N 必须拆成子模块。"
  *
- * 这条规则落地后，两类关系的判断都变得非常简单：
- *   - 模块内部（primary_table 与该模块字段里出现的其它表）—— 永远应该是平铺 JOIN，
- *     如果不是，说明违反了新规则，直接在 validateModule() 里报错，而不是在查询期
- *     悄悄生成一个笛卡尔积。
- *   - 父子模块（sys_module.parent_id）—— 只能是 SAME_ENTITY（同一张 primary_table）
- *     或者 CHILD（真正的 1:N）。
+ * <p>物理表关系本身只是底层元数据。查询语义必须先确定逻辑模块及模块树上下文，
+ * 再使用该模块的 primary_table 解释物理关系；不能仅凭 tableA/tableB 推断一个
+ * 查询 JOIN 的业务语义。</p>
  */
 public class RelationResolver {
 
@@ -54,7 +51,7 @@ public class RelationResolver {
     /**
      * 推断父子模块之间的关系。按新规则，合法结果只有两种；FLAT(1:1) 理论上不应该
      * 出现在跨模块场景——如果出现了，说明有人把一个本该合并进同一模块的 1:1/N:1
-     * 关联错误地拆成了独立子模块，直接报错提醒去修配置。
+     * 关联错误地拆成了父子模块，直接报错提醒去修配置。
      */
     public ModuleRelationKind resolveParentChild(SysModule parent, SysModule child) {
         if (parent.primaryTable().equals(child.primaryTable())) {
@@ -69,7 +66,27 @@ public class RelationResolver {
         return ModuleRelationKind.CHILD;
     }
 
-    /** 取出两张表之间的关系配置，供构建 JOIN/过滤条件时使用。找不到就是配置缺失，直接报错。 */
+    /**
+     * 按“模块上下文 + 目标物理表”解析模块内部关系。
+     *
+     * <p>调用方必须先由模块树确定 ownerModule；这里不接受两个裸表名作为唯一语义入口。
+     * 返回的仍然是底层物理关系，具体方向由上层 resolved plan 按模块上下文确定。</p>
+     */
+    public SysTableRelation relationOfModule(long ownerModuleId, String otherTable) {
+        SysModule owner = registry.module(ownerModuleId);
+        if (owner.isVirtual()) {
+            throw new MetadataValidationException("虚拟模块 " + ownerModuleId + " 不能拥有物理表 JOIN");
+        }
+        if (otherTable == null || otherTable.isBlank()) {
+            throw new IllegalArgumentException("关联表不能为空");
+        }
+        if (owner.primaryTable().equals(otherTable)) {
+            throw new IllegalArgumentException("关联表 " + otherTable + " 与模块 " + ownerModuleId + " 的主表相同");
+        }
+        return relationOf(owner.primaryTable(), otherTable);
+    }
+
+    /** 取出两张表之间的底层关系配置。调用方应已完成模块语义解析。 */
     public SysTableRelation relationOf(String tableA, String tableB) {
         Optional<SysTableRelation> rel = registry.findRelation(tableA, tableB);
         return rel.orElseThrow(() -> new MetadataValidationException(
