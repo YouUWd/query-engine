@@ -46,6 +46,9 @@ public final class QueryPlanExecutor {
         Map<Long, List<SysModuleField>> requested = resolveProjection(plan.projections());
         Map<Long, String> aliases = projectionAliases(plan);
         FlatGroup tree = treeBuilder.buildFromRoot(plan.rootModuleId(), requested.keySet());
+        // Resolve physical table joins once, after logical fields have been resolved.
+        // The renderer receives this completed tree and never infers joins from table names.
+        tree = treeBuilder.resolveTableJoins(tree, requested);
         Condition rootCondition = conditionCompiler.compile(dsl, plan.rootModuleId(), plan.filterExpression());
         Map<Long, Condition> localConditions = buildLocalConditions(dsl, plan.rootModuleId(), plan.filterExpression());
 
