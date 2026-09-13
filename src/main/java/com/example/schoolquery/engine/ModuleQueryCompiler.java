@@ -23,10 +23,18 @@ public final class ModuleQueryCompiler {
         ModuleSqlAst ast = parser.parseSelect(sql);
         SysModule root = registry.module(ast.rootModuleToken());
         List<LogicalFieldRef> projections = new ArrayList<>();
+        List<String> aliases = new ArrayList<>();
         for (String token : ast.projectionTokens()) {
-            String expression = stripAlias(token);
-            if ("*".equals(expression)) projections.addAll(allVisible(root.id()));
-            else projections.add(resolve(root.id(), expression));
+            ProjectionToken projection = projectionToken(token);
+            if ("*".equals(projection.expression())) {
+                List<LogicalFieldRef> expanded = allVisible(root.id());
+                projections.addAll(expanded);
+                expanded.forEach(ref -> aliases.add("f" + ref.fieldId()));
+            } else {
+                LogicalFieldRef ref = resolve(root.id(), projection.expression());
+                projections.add(ref);
+                aliases.add(projection.alias() == null ? "f" + ref.fieldId() : projection.alias());
+            }
         }
 
         List<FilterPlan> flat = new ArrayList<>();
@@ -41,7 +49,7 @@ public final class ModuleQueryCompiler {
             int offset = ast.offset() == null ? 0 : ast.offset();
             page = new PaginationPlan(offset / ast.limit() + 1, ast.limit(), offset);
         }
-        return new QueryPlan(root.id(), projections, List.of(), flat, expr, new SortPlan(sorts), page);
+        return new QueryPlan(root.id(), projections, List.of(), flat, expr, new SortPlan(sorts), page, aliases);
     }
 
     private FilterExpressionPlan compileFilter(long root, Expression e, List<FilterPlan> flat) {
@@ -161,9 +169,20 @@ public final class ModuleQueryCompiler {
         return r;
     }
 
-    private String stripAlias(String value) {
+    private ProjectionToken projectionToken(String value) {
         String x = value.trim();
-        int i = x.toLowerCase(Locale.ROOT).lastIndexOf(" as ");
-        return i > 0 ? x.substring(0, i).trim() : x;
+        int as = x.toLowerCase(Locale.ROOT).lastIndexOf(" as ");
+        if (as > 0) return new ProjectionToken(x.substring(0, as).trim(), cleanAlias(x.substring(as + 4)));
+        // JSqlParser can render an alias without AS as "expression alias".
+        String[] parts = x.split("\\s+");
+        if (parts.length == 2 && parts[1].matches("[A-Za-z_][A-Za-z0-9_]*"))
+            return new ProjectionToken(parts[0], cleanAlias(parts[1]));
+        return new ProjectionToken(x, null);
     }
+
+    private String cleanAlias(String alias) {
+        return alias.trim().replace("`", "").replace("\"", "");
+    }
+
+    private record ProjectionToken(String expression, String alias) {}
 }
