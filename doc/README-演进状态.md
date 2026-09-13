@@ -13,8 +13,9 @@
 - `PaginationPlan` 保留精确 SQL OFFSET，同时兼容原有 pageNo/pageSize 调用方式。
 - `PlanConditionCompiler`：完整 Boolean Filter Tree 编译为 jOOQ `Condition`；后代 1:N 字段形成相关 `EXISTS` 链。
 - `ResolvedRelationPlan` 成为跨模块关系的语义解析结果；`NestedGroup` 不再要求 SQL renderer 根据物理表重新推断父子模块关系。
-- `ResolvedTableJoinPlan` 成为模块内部跨物理表 JOIN 的预解析结果。
-- `QueryTreeBuilder.resolveTableJoins(...)` 在逻辑字段解析完成后，仅针对本次请求实际需要的字段预解析物理表 JOIN。
+- `ResolvedTableJoinPlan` 成为模块内部跨物理表 JOIN 的预解析结果，并保留来源 ModuleId / 目标 ModuleId 上下文。
+- `QueryTreeBuilder.resolveTableJoins(...)` 以已构建的模块树和字段所属 Module 为关系解析上下文，只针对本次请求实际需要的字段预解析物理表 JOIN。
+- 同一 FlatGroup 中如果不同逻辑 Module 对同一物理表产生不同 JOIN 键，直接判定模块树对应的物理 JOIN 不自洽并失败，不再静默选择一个关系。
 - `FlatGroupSqlBuilder` 已切换为只消费 `FlatGroup.tableJoins()`；SQL renderer 不再通过 `tableA/tableB` 调用 `RelationResolver.relationOf(...)` 推断模块内部 JOIN。
 - 新增 `QueryPlanExecutor`：直接执行 `QueryPlan`，不再依赖 `PagedFieldDrivenQueryService` 的 LIMIT/OR 兼容限制。
 - `DefaultModuleSqlEngine`：公开 DQL 入口已经切换到 `ModuleSqlParser -> ModuleQueryCompiler -> QueryPlanExecutor`；标量 DML 使用独立 Mutation Pipeline。
@@ -33,14 +34,31 @@
 
 Module SQL 首先解析为逻辑模块和逻辑字段，再映射到物理表、物理列。不能因为两个 Module 指向同一张物理表，就把两个 Module 当成同一个业务语义对象。
 
-### 2. 关系必须先解析、后渲染
+### 2. 模块树是关系解析的上下文，表关系不能脱离模块树独立决定
 
-关系解析分成两个层次：
+模块树不是 SQL renderer 的辅助信息，而是确定关系语义的核心上下文。完整关系解析遵循：
 
-- **模块关系**：`ResolvedRelationPlan`，表达父 Module -> 子 Module 的 1:1 / 1:N 语义。
-- **模块内部物理表 JOIN**：`ResolvedTableJoinPlan`，表达当前 FlatGroup 内 primary table 与实际投影表之间已经确定的列关联。
+```text
+Module SQL
+    ↓
+逻辑 Module / Field
+    ↓
+构建模块树（父子路径、SAME_ENTITY、1:N、虚拟节点）
+    ↓
+在具体 Module 节点上下文中解析其字段涉及的物理表
+    ↓
+得到 ResolvedRelationPlan / ResolvedTableJoinPlan
+    ↓
+SQL renderer 只渲染已解析关系
+```
 
-SQL renderer 只负责把上述结果翻译成 jOOQ SQL，不再根据物理表名称猜测业务关系。
+因此：
+
+- 父 Module -> 子 Module 的关系必须通过模块树路径确定，而不是只看两张物理表。
+- 模块内部字段引用其它物理表时，必须以“字段所属 Module + 该 Module 的 primary_table”为解析上下文。
+- 同一物理表对不能作为 JOIN 的唯一身份；ModuleId 是 JOIN 语义的来源上下文。
+- 一个 FlatGroup 最终只能形成自洽的物理行。如果不同逻辑 Module 对同一目标表要求不同 JOIN 键，不能猜测，必须报元数据不一致。
+- SQL renderer 不拥有关系推断能力，只消费 `ResolvedTableJoinPlan` / `ResolvedRelationPlan`。
 
 ### 3. 1:N 后代过滤使用 EXISTS
 
@@ -70,14 +88,14 @@ ModuleUpdateResult executeUpdate(DSLContext dsl, String sql);
 
 ## 仍在演进
 
-1. **测试与 CI 稳定化**：最近一次“预解析物理表 JOIN”提交的 Maven Test 为失败状态，需要继续定位失败用例并补齐对应 H2 E2E，而不能把失败状态标记为完成。
+1. **测试与 CI 稳定化**：最近一次“预解析物理表 JOIN”相关提交需要继续通过 CI 验证，并补齐对应 H2 E2E；不能把失败状态标记为完成。
 2. **1:N 局部过滤**：`compileLocal(...)` 已能把过滤表达式投影到子树；复杂跨层 OR 仍需要继续明确其安全语义和结果集语义。
 3. **SELECT ***：当前方向是将 `SELECT *` 定义为“当前根模块子树内所有可见 FieldId 的投影展开”，而不是物理 `table.*`。
 4. **ProjectionPlan**：目前投影别名已经可以进入 QueryPlan、结果和 `ColumnMeta`；下一步应把“投影 occurrence”提升为独立模型，以支持同一 FieldId 多次投影并使用不同别名。
 5. **DQL 性能路径**：当前正确性实现仍使用 jOOQ MULTISET。后续在语义稳定后，再评估 Root Page -> Batch Child Load -> ResultAssembler，以解决大分页和高基数 1:N 场景。
 6. **标量 DML 完整性**：继续补齐生成主键、类型转换、更新条件、批量操作等边界。
 7. **Aggregate Mutation**：继续接入乐观锁、软删除以及 Association / Composition 等元数据语义。
-8. **E2E 覆盖**：扩展到根查询、1:1、1:N、同表多 Module、虚拟 Module、模块内多物理表 JOIN、后代 EXISTS、AND/OR、SELECT *、别名、LIMIT/OFFSET、权限 Condition、标量 DML 和级联保存。
+8. **E2E 覆盖**：扩展到根查询、1:1、1:N、同表多 Module、虚拟 Module、模块树决定的模块内多物理表 JOIN、后代 EXISTS、AND/OR、SELECT *、别名、LIMIT/OFFSET、权限 Condition、标量 DML 和级联保存。
 
 ## 目标架构
 
@@ -96,8 +114,10 @@ Semantic Compiler
    +--> QueryPlan / MutationPlan / AggregateMutation
    |
    +--> LogicalFieldRef
-   +--> ResolvedRelationPlan
-   +--> ResolvedTableJoinPlan
+   +--> Module Query Tree
+   |       |
+   |       +--> ResolvedRelationPlan
+   |       +--> ResolvedTableJoinPlan
    |
    v
 QueryPlanExecutor / MutationExecutor
@@ -114,14 +134,16 @@ ModuleQueryResult / ModuleUpdateResult
 
 ## 当前里程碑
 
-**Module SQL 已经成为公开执行入口，语义层已经从“按物理表拼 SQL”进一步演进为“先完成 Module/Field/Relation 解析，再渲染 SQL”。**
+**Module SQL 已经成为公开执行入口，语义层已经从“按物理表拼 SQL”进一步演进为“以模块树确定关系上下文，先完成 Module/Field/Relation 解析，再渲染 SQL”。**
 
-当前最重要的架构边界已经明确：
+当前最重要的架构边界：
 
 ```text
 逻辑身份解析
     ↓
-模块关系解析
+构建模块树
+    ↓
+沿模块树确定关系上下文
     ↓
 请求字段解析
     ↓
@@ -132,4 +154,4 @@ WHERE / EXISTS / LIMIT / OFFSET Condition 化
 jOOQ 渲染
 ```
 
-下一阶段不再继续堆叠 renderer 层的特殊判断，而是优先把失败的 CI 用例修正，并以 H2 E2E 把上述语义边界锁死。
+下一阶段继续以这个边界推进：关系的唯一性和自洽性属于语义/元数据阶段，renderer 不再承担任何业务关系猜测。
