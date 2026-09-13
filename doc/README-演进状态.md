@@ -30,9 +30,21 @@
 
 ## 当前架构原则
 
-### 1. ModuleId / FieldId 是唯一语义身份
+### 1. ModuleId 是模块树入口，FieldId 是字段唯一身份
 
-Module SQL 首先解析为逻辑模块和逻辑字段，再映射到物理表、物理列。不能因为两个 Module 指向同一张物理表，就把两个 Module 当成同一个业务语义对象。
+`ModuleId` 用于确定查询的 Root Module，并快速定位需要构建的 Module Tree。`FieldId` 是全局唯一的逻辑字段身份；一个 FieldId 固定属于一个 Module，业务含义和 `table.column` 物理映射均固定。因此两个不同 Module 即使映射到相同的物理 `table.column`，仍然是两个完全独立的逻辑字段，不能通过物理表列反向合并。
+
+```text
+rootModuleId
+    ↓
+Module Tree
+    ↓
+ModuleId / Module context
+    ↓
+FieldId
+    ↓
+固定的 table.column
+```
 
 ### 2. 模块树是关系解析的上下文，表关系不能脱离模块树独立决定
 
@@ -60,7 +72,20 @@ SQL renderer 只渲染已解析关系
 - 一个 FlatGroup 最终只能形成自洽的物理行。如果不同逻辑 Module 对同一目标表要求不同 JOIN 键，不能猜测，必须报元数据不一致。
 - SQL renderer 不拥有关系推断能力，只消费 `ResolvedTableJoinPlan` / `ResolvedRelationPlan`。
 
-### 3. 1:N 后代过滤使用 EXISTS
+### 3. 权限在 Engine 之前完成字段裁剪，数据权限就是 WHERE Predicate
+
+FieldId 字段权限属于 Engine 上游的配置/权限层。进入 Engine 前即可得到本次请求允许使用的 FieldId 集合；Engine 不负责重新计算角色字段权限。
+
+数据权限同样不建立独立执行体系。对于“表名 + 字段名 + IN 值集合”这类数据权限，最终只是附加的 `WHERE` Predicate，例如：
+
+```sql
+WHERE school_id IN (1, 2, 3)
+  AND status IN ('NORMAL', 'GRADUATED')
+```
+
+因此权限、业务过滤和后续 Count/DML 过滤最终都可以统一落到 Condition / FilterExpression 上，不需要 `PermissionPlan`、特殊分页器或独立权限执行器。
+
+### 4. 1:N 后代过滤使用 EXISTS
 
 例如：
 
@@ -72,11 +97,11 @@ WHERE f201 = 'Java'
 
 当 `f201` 位于 1:N 子模块时，语义是“根实体存在满足条件的子实体”，而不是把根查询直接 JOIN 成重复行。因此过滤条件编译为相关 `EXISTS` 链。
 
-### 4. 权限与分页不建立特殊执行体系
+### 5. 权限与分页不建立特殊执行体系
 
-权限本质上是附加 `WHERE` 条件；分页本质上是 `LIMIT/OFFSET`。它们不再被设计成独立的特殊执行器或特殊根分页抽象。后续权限接入应保持 `Condition` 注入模型，确保 Data / Count / DML 的过滤语义一致。
+权限本质上是附加 `WHERE` 条件；分页本质上是 `LIMIT/OFFSET`。它们不再被设计成独立的特殊执行器或特殊根分页抽象。
 
-### 5. QueryTree / FlatGroup / jOOQ 是内部实现细节
+### 6. QueryTree / FlatGroup / jOOQ 是内部实现细节
 
 公开 API 不暴露 QueryTree、FlatGroup、ResolvedTableJoinPlan 等实现模型。调用方只面对 Module SQL 和标准结果：
 
@@ -88,18 +113,24 @@ ModuleUpdateResult executeUpdate(DSLContext dsl, String sql);
 
 ## 仍在演进
 
-1. **测试与 CI 稳定化**：最近一次“预解析物理表 JOIN”相关提交需要继续通过 CI 验证，并补齐对应 H2 E2E；不能把失败状态标记为完成。
+1. **测试与 CI 稳定化**：最新语义调整后的分支需要继续通过 CI 验证，并补齐对应 H2 E2E；不能把未验证状态标记为完成。
 2. **1:N 局部过滤**：`compileLocal(...)` 已能把过滤表达式投影到子树；复杂跨层 OR 仍需要继续明确其安全语义和结果集语义。
 3. **SELECT ***：当前方向是将 `SELECT *` 定义为“当前根模块子树内所有可见 FieldId 的投影展开”，而不是物理 `table.*`。
-4. **ProjectionPlan**：目前投影别名已经可以进入 QueryPlan、结果和 `ColumnMeta`；下一步应把“投影 occurrence”提升为独立模型，以支持同一 FieldId 多次投影并使用不同别名。
+4. **ProjectionPlan**：目前投影别名已经可以进入 QueryPlan、结果和 `ColumnMeta`；下一步应把“投影 occurrence”提升为独立模型，以支持同一 FieldId 多次投影并使用不同别名。这里的 occurrence 只解决 SQL SELECT 列表重复引用，不改变 FieldId 的唯一语义。
 5. **DQL 性能路径**：当前正确性实现仍使用 jOOQ MULTISET。后续在语义稳定后，再评估 Root Page -> Batch Child Load -> ResultAssembler，以解决大分页和高基数 1:N 场景。
 6. **标量 DML 完整性**：继续补齐生成主键、类型转换、更新条件、批量操作等边界。
 7. **Aggregate Mutation**：继续接入乐观锁、软删除以及 Association / Composition 等元数据语义。
-8. **E2E 覆盖**：扩展到根查询、1:1、1:N、同表多 Module、虚拟 Module、模块树决定的模块内多物理表 JOIN、后代 EXISTS、AND/OR、SELECT *、别名、LIMIT/OFFSET、权限 Condition、标量 DML 和级联保存。
+8. **E2E 覆盖**：扩展到根查询、1:1、1:N、同表多 Module、虚拟 Module、模块树决定的模块内多物理表 JOIN、后代 EXISTS、AND/OR、SELECT *、别名、LIMIT/OFFSET、上游权限裁剪、数据权限 Condition、标量 DML 和级联保存。
 
 ## 目标架构
 
 ```text
+上游权限层
+   |
+   +--> FieldId 可见集合
+   +--> Data Permission Condition
+   |
+   v
 Module SQL
    |
    v
@@ -134,24 +165,26 @@ ModuleQueryResult / ModuleUpdateResult
 
 ## 当前里程碑
 
-**Module SQL 已经成为公开执行入口，语义层已经从“按物理表拼 SQL”进一步演进为“以模块树确定关系上下文，先完成 Module/Field/Relation 解析，再渲染 SQL”。**
+**Module SQL 已经成为公开执行入口，语义层已经从“按物理表拼 SQL”进一步演进为“以 ModuleId 定位模块树，以 FieldId 标识逻辑字段，沿模块树确定关系上下文，先完成 Module/Field/Relation 解析，再渲染 SQL”。**
 
 当前最重要的架构边界：
 
 ```text
-逻辑身份解析
+上游完成 Field Permission
     ↓
-构建模块树
+ModuleId 定位 Root Module Tree
+    ↓
+FieldId 解析逻辑字段
     ↓
 沿模块树确定关系上下文
     ↓
-请求字段解析
-    ↓
 实际需要的物理表 JOIN 预解析
     ↓
-WHERE / EXISTS / LIMIT / OFFSET Condition 化
+业务 Filter + Data Permission → WHERE / EXISTS
+    ↓
+LIMIT / OFFSET
     ↓
 jOOQ 渲染
 ```
 
-下一阶段继续以这个边界推进：关系的唯一性和自洽性属于语义/元数据阶段，renderer 不再承担任何业务关系猜测。
+下一阶段继续以这个边界推进：关系的唯一性和自洽性属于语义/元数据阶段，权限属于上游字段裁剪或附加 Predicate，renderer 不再承担任何业务关系猜测。
