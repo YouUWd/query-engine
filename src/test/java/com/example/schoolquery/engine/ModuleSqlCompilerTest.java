@@ -45,6 +45,14 @@ class ModuleSqlCompilerTest {
     }
 
     @Test
+    void preservesProjectionAliases() {
+        QueryPlan plan = new ModuleQueryCompiler(registry()).compile(
+                "select f101 as studentId, f102 name from module(1)");
+        assertEquals(List.of("studentId", "name"), plan.projectionAliases());
+        assertEquals(List.of(101L, 102L), plan.projections().stream().map(r -> r.fieldId()).toList());
+    }
+
+    @Test
     void compilesScalarInsert() {
         MutationPlan plan = new MutationCompiler(registry()).compile(
                 "insert into student (id, name, age) values (1, 'Alice', 18)");
