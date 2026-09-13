@@ -13,6 +13,7 @@ import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.update.Update;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Compiles standard INSERT/UPDATE/DELETE syntax into a physical-independent plan. */
@@ -39,7 +40,20 @@ public final class MutationCompiler {
 
     private String normalizeModuleSource(String sql) {
         if (sql == null || sql.isBlank()) throw new IllegalArgumentException("Mutation SQL cannot be blank");
-        return MODULE_SOURCE.matcher(sql).replaceAll("$1");
+        Matcher matcher = MODULE_SOURCE.matcher(sql);
+        StringBuffer result = new StringBuffer();
+        boolean found = false;
+        while (matcher.find()) {
+            found = true;
+            String token = matcher.group(1);
+            if (token.startsWith("'") && token.endsWith("'")) token = token.substring(1, token.length() - 1).replace("''", "'");
+            SysModule module = registry.module(token);
+            if (module.isVirtual()) throw new IllegalArgumentException("Cannot mutate virtual module: " + module.id());
+            matcher.appendReplacement(result, Matcher.quoteReplacement("`" + module.primaryTable() + "`"));
+        }
+        matcher.appendTail(result);
+        if (!found) throw new IllegalArgumentException("Mutation SQL must target module(...)");
+        return result.toString();
     }
 
     private MutationPlan compileInsert(Insert insert) {
