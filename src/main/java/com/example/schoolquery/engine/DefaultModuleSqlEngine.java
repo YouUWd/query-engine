@@ -26,27 +26,21 @@ public final class DefaultModuleSqlEngine implements ModuleSqlEngine {
     }
 
     /** Compatibility constructor; the old paged executor is no longer part of Module SQL execution. */
-    public DefaultModuleSqlEngine(MetadataRegistry registry, Object ignoredLegacyExecutor) {
-        this(registry);
-    }
+    public DefaultModuleSqlEngine(MetadataRegistry registry, Object ignoredLegacyExecutor) { this(registry); }
 
     @Override public ModuleQueryResult executeQuery(DSLContext dsl,String sql) {
         return queryExecutor.execute(dsl,compiler.compile(sql));
     }
 
     @Override public List<ColumnMeta> getMetadata(String sql) {
-        return queryExecutorMetadata(compiler.compile(sql));
+        return compiler.compile(sql).projections().stream().map(ref -> {
+            var f=registry.field(ref.fieldId()); var m=registry.module(ref.moduleId());
+            return new ColumnMeta(f.id(),m.id(),m.moduleName(),f.tableName(),f.columnName(),"f"+f.id(),com.example.schoolquery.model.SysFieldType.UNKNOWN);
+        }).toList();
     }
 
     @Override public ModuleUpdateResult executeUpdate(DSLContext dsl,String sql) {
         MutationPlan plan=mutationCompiler.compile(sql);
-        return new ModuleUpdateResult(plan.operation().name(),mutationExecutor.execute(dsl,plan));
-    }
-
-    private List<ColumnMeta> queryExecutorMetadata(com.example.schoolquery.plan.QueryPlan plan) {
-        return plan.projections().stream().map(ref -> {
-            var f=registry.field(ref.fieldId()); var m=registry.module(ref.moduleId());
-            return new ColumnMeta(f.id(),m.id(),m.moduleName(),f.tableName(),f.columnName(),"f"+f.id(),com.example.schoolquery.model.SysFieldType.UNKNOWN);
-        }).toList();
+        return new ModuleUpdateResult(mutationExecutor.execute(dsl,plan),List.of());
     }
 }
