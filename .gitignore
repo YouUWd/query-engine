@@ -1,0 +1,15 @@
+# ===== 构建产物 =====
+target/
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# ===== IDE =====
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.settings/
+.project
+.classpath
+*.factorypath
