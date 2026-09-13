@@ -1,6 +1,7 @@
 package com.example.schoolquery.plan;
 
 import com.example.schoolquery.metadata.MetadataRegistry;
+import com.example.schoolquery.model.RelationType;
 import com.example.schoolquery.model.SysModuleField;
 import com.example.schoolquery.model.SysTableRelation;
 import com.example.schoolquery.querytree.FlatGroup;
@@ -38,8 +39,7 @@ public final class QueryPlanCompiler {
         }
 
         FlatGroup tree = treeBuilder.buildFromRoot(rootModuleId, touchedModules);
-        List<RelationPlan> relations = collectRelations(tree);
-        return new QueryPlan(rootModuleId, projections, relations, List.of(), null, null);
+        return new QueryPlan(rootModuleId, projections, collectRelations(tree), List.of(), null, null);
     }
 
     /** Compile a query and infer its root from the requested fields. */
@@ -54,16 +54,7 @@ public final class QueryPlanCompiler {
         }
 
         FlatGroup tree = treeBuilder.buildAutoRoot(touchedModules);
-        List<RelationPlan> relations = collectRelations(tree);
-        return new QueryPlan(registry.nearestRealAncestor(treeRootModuleId(tree)).id(), projections,
-                relations, List.of(), null, null);
-    }
-
-    private long treeRootModuleId(FlatGroup tree) {
-        if (tree.mergedModuleIds().isEmpty()) {
-            throw new IllegalStateException("QueryTree root has no module id");
-        }
-        return tree.mergedModuleIds().get(0);
+        return new QueryPlan(tree.mergedModuleIds().get(0), projections, collectRelations(tree), List.of(), null, null);
     }
 
     private List<RelationPlan> collectRelations(FlatGroup group) {
@@ -76,7 +67,6 @@ public final class QueryPlanCompiler {
         for (NestedGroup nested : group.nestedChildren()) {
             SysTableRelation relation = nested.relation();
             if (relation != null) {
-                boolean parentIsMain = relation.mainTable().equals(group.primaryTable());
                 result.add(new RelationPlan(
                         group.mergedModuleIds().get(0),
                         nested.childModuleId(),
@@ -91,11 +81,9 @@ public final class QueryPlanCompiler {
     }
 
     private RelationPlan.RelationType toPlanType(SysTableRelation relation) {
-        return switch (relation.type()) {
-            case ONE_TO_ONE -> RelationPlan.RelationType.ONE_TO_ONE;
-            case ONE_TO_MANY -> RelationPlan.RelationType.ONE_TO_MANY;
-            case MANY_TO_ONE -> RelationPlan.RelationType.MANY_TO_ONE;
-        };
+        return relation.type() == RelationType.ONE_TO_ONE
+                ? RelationPlan.RelationType.ONE_TO_ONE
+                : RelationPlan.RelationType.ONE_TO_MANY;
     }
 
     private Set<Long> normalizeFieldIds(Collection<Long> fieldIds) {
