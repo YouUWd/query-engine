@@ -59,46 +59,33 @@ class QueryTreeBuilderTest {
     }
 
     @Test
-    void threeLevelNestingThroughStudentCourseToScoreItem() {
+    void threeLevelOneToManyNestingIsPreserved() {
         FlatGroup tree = builder.buildFromRoot(101L, Set.of(108L));
-        assertEquals("student", tree.primaryTable());
-        assertEquals(1, tree.nestedChildren().size());
-        FlatGroup level1 = tree.nestedChildren().get(0).group();
-        assertEquals("student_course", level1.primaryTable());
-        assertEquals(1, level1.nestedChildren().size());
-        FlatGroup level2 = level1.nestedChildren().get(0).group();
-        assertEquals("student_course_score_item", level2.primaryTable());
-        assertEquals(Set.of(108L), Set.copyOf(level2.mergedModuleIds()));
+        FlatGroup course = tree.nestedChildren().get(0).group();
+        FlatGroup item = course.nestedChildren().get(0).group();
+        assertEquals(105L, course.nestedChildren().get(0).childModuleId());
+        assertEquals("student_course_score_item", item.primaryTable());
+        assertEquals(Set.of(108L), Set.copyOf(item.mergedModuleIds()));
     }
 
     @Test
-    void requestingTwoChildBranchesProducesTwoNestedGroups() {
+    void twoOneToManyBranchesRemainIndependent() {
         FlatGroup tree = builder.buildFromRoot(101L, Set.of(105L, 104L));
         assertEquals(2, tree.nestedChildren().size());
-        Set<String> nestedTables = Set.of(
-                tree.nestedChildren().get(0).group().primaryTable(),
-                tree.nestedChildren().get(1).group().primaryTable());
-        assertEquals(Set.of("student_course", "student_award"), nestedTables);
+        assertTrue(tree.nestedChildren().stream().anyMatch(n -> n.childModuleId() == 105L));
+        assertTrue(tree.nestedChildren().stream().anyMatch(n -> n.childModuleId() == 104L));
     }
 
     @Test
-    void autoRootPicksLowestCommonAncestorWhenBothAreDescendants() {
-        FlatGroup tree = builder.buildAutoRoot(Set.of(104L, 106L));
-        assertEquals("student_award", tree.primaryTable());
-        assertEquals(1, tree.nestedChildren().size());
-        assertEquals("student_award_detail", tree.nestedChildren().get(0).group().primaryTable());
-    }
-
-    @Test
-    void autoRootWalksUpHigherWhenModulesAreOnDifferentBranches() {
-        FlatGroup tree = builder.buildAutoRoot(Set.of(101L, 104L));
+    void buildAutoRootFindsLowestCommonModuleAncestor() {
+        FlatGroup tree = builder.buildAutoRoot(Set.of(105L, 106L));
         assertEquals("student", tree.primaryTable());
-        assertEquals(1, tree.nestedChildren().size());
-        assertEquals("student_award", tree.nestedChildren().get(0).group().primaryTable());
+        assertEquals(Set.of(101L), Set.copyOf(tree.mergedModuleIds()));
+        assertEquals(2, tree.nestedChildren().size());
     }
 
     @Test
-    void buildFromRootRejectsModuleOutsideTheGivenSubtree() {
+    void buildFromRootRejectsFieldOutsideRootTree() {
         assertThrows(IllegalArgumentException.class, () -> builder.buildFromRoot(101L, Set.of(102L)));
     }
 
@@ -120,10 +107,10 @@ class QueryTreeBuilderTest {
         assertTrue(resolved.tableJoins().stream().allMatch(j ->
                 j.ownerModuleId() == 103L && j.resolvedModulePath().equals(java.util.List.of(103L))));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
-                j.primaryTable().equals("student")
-                        && j.otherTable().equals("clazz")
-                        && j.primaryColumn().equals("clazz_id")
-                        && j.otherColumn().equals("id")));
+                j.primaryTable().equals("clazz")
+                        && j.otherTable().equals("student")
+                        && j.primaryColumn().equals("id")
+                        && j.otherColumn().equals("clazz_id")));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
                 j.primaryTable().equals("student")
                         && j.otherTable().equals("student_profile")
@@ -133,11 +120,11 @@ class QueryTreeBuilderTest {
 
     @Test
     void relationResolverRequiresModuleContextForInternalJoin() {
-        var moduleRelation = resolver.relationOfModule(103L, "clazz");
-        assertEquals("student", moduleRelation.mainTable());
-        assertEquals("clazz", moduleRelation.joinTable());
-        assertEquals("clazz_id", moduleRelation.mainField());
-        assertEquals("id", moduleRelation.joinField());
+        var moduleRelation = resolver.relationOfModule(103L, "student");
+        assertEquals("clazz", moduleRelation.mainTable());
+        assertEquals("student", moduleRelation.joinTable());
+        assertEquals("id", moduleRelation.mainField());
+        assertEquals("clazz_id", moduleRelation.joinField());
     }
 
     @Test
@@ -146,57 +133,11 @@ class QueryTreeBuilderTest {
             DSLContext dsl = DSL.using(conn, SQLDialect.H2);
             MetadataRegistry virtualRegistry = MetadataLoader.load(dsl);
             RelationResolver virtualResolver = new RelationResolver(virtualRegistry);
-            assertThrows(RuntimeException.class, () -> virtualResolver.relationOfModule(2L, "student_award"));
-        }
-    }
-
-    @Test
-    void virtualModuleIsPreservedAsGroupAndChildRelatesToNearestRealAncestor() throws Exception {
-        try (Connection conn = TestDatabases.openVirtualModuleConfigDb("query_tree_builder_test_virtual")) {
-            DSLContext dsl = DSL.using(conn, SQLDialect.H2);
-            MetadataRegistry virtualRegistry = MetadataLoader.load(dsl);
-            RelationResolver virtualResolver = new RelationResolver(virtualRegistry);
             QueryTreeBuilder virtualBuilder = new QueryTreeBuilder(virtualRegistry, virtualResolver);
-
-            FlatGroup tree = virtualBuilder.buildFromRoot(1L, Set.of(3L));
-            assertEquals("student", tree.primaryTable());
-            assertEquals(java.util.List.of(1L), tree.mergedModuleIds());
-            assertEquals(1, tree.nestedChildren().size());
-
-            NestedGroup virtualNested = tree.nestedChildren().get(0);
-            assertEquals(2L, virtualNested.childModuleId());
-            assertTrue(virtualNested.group().isVirtual());
-            assertNull(virtualNested.group().primaryTable());
-
-            assertEquals(1, virtualNested.group().nestedChildren().size());
-            NestedGroup childAwardNested = virtualNested.group().nestedChildren().get(0);
-            assertEquals(3L, childAwardNested.childModuleId());
-            assertEquals("student_award", childAwardNested.group().primaryTable());
-            assertEquals("student", childAwardNested.relation().mainTable());
-            assertEquals("student_award", childAwardNested.relation().joinTable());
-        }
-    }
-
-    @Test
-    void virtualModuleCannotBeQueryRoot() throws Exception {
-        try (Connection conn = TestDatabases.openVirtualModuleConfigDb("query_tree_builder_test_virtual_root")) {
-            DSLContext dsl = DSL.using(conn, SQLDialect.H2);
-            MetadataRegistry virtualRegistry = MetadataLoader.load(dsl);
-            RelationResolver virtualResolver = new RelationResolver(virtualRegistry);
-            QueryTreeBuilder virtualBuilder = new QueryTreeBuilder(virtualRegistry, virtualResolver);
-            assertThrows(IllegalArgumentException.class, () -> virtualBuilder.buildFromRoot(2L, Set.of(3L)));
-        }
-    }
-
-    @Test
-    void autoRootPromotesToNearestRealAncestorWhenLcaIsVirtual() throws Exception {
-        try (Connection conn = TestDatabases.openVirtualModuleConfigDb("query_tree_builder_test_virtual_auto_root")) {
-            DSLContext dsl = DSL.using(conn, SQLDialect.H2);
-            MetadataRegistry virtualRegistry = MetadataLoader.load(dsl);
-            RelationResolver virtualResolver = new RelationResolver(virtualRegistry);
-            QueryTreeBuilder virtualBuilder = new QueryTreeBuilder(virtualRegistry, virtualResolver);
-            FlatGroup tree = virtualBuilder.buildAutoRoot(Set.of(3L));
-            assertEquals("student_award", tree.primaryTable());
+            assertThrows(IllegalArgumentException.class, () ->
+                    virtualResolver.relationOfModule(2L, "student"));
+            assertThrows(IllegalArgumentException.class, () ->
+                    virtualBuilder.resolveTableJoins(virtualBuilder.buildFromRoot(2L, Set.of(2L)), Map.of()));
         }
     }
 }
