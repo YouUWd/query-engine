@@ -3,7 +3,6 @@ package com.example.schoolquery.querytree;
 import com.example.schoolquery.TestDatabases;
 import com.example.schoolquery.metadata.MetadataLoader;
 import com.example.schoolquery.metadata.MetadataRegistry;
-import com.example.schoolquery.model.SysTableRelation;
 import com.example.schoolquery.relation.RelationResolver;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -134,7 +133,7 @@ class QueryTreeBuilderTest {
 
     @Test
     void relationResolverRequiresModuleContextForInternalJoin() {
-        SysTableRelation moduleRelation = resolver.relationOfModule(103L, "clazz");
+        var moduleRelation = resolver.relationOfModule(103L, "clazz");
         assertEquals("student", moduleRelation.mainTable());
         assertEquals("clazz", moduleRelation.joinTable());
         assertEquals("clazz_id", moduleRelation.mainField());
