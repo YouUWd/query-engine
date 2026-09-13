@@ -120,10 +120,12 @@ class QueryTreeBuilderTest {
                 j.ownerModuleId() == 103L && j.resolvedModulePath().equals(java.util.List.of(103L))));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
                 j.primaryTable().equals("student") && j.otherTable().equals("clazz")
-                        && j.primaryColumn().equals("clazz_id") && j.otherColumn().equals("id")));
+                        && j.primaryColumn().equals("clazz_id") && j.otherColumn().equals("id")),
+                resolved.tableJoins().toString());
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
                 j.primaryTable().equals("student") && j.otherTable().equals("student_profile")
-                        && j.primaryColumn().equals("id") && j.otherColumn().equals("student_id")));
+                        && j.primaryColumn().equals("id") && j.otherColumn().equals("student_id")),
+                resolved.tableJoins().toString());
     }
 
     @Test
