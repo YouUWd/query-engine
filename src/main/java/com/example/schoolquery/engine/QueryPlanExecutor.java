@@ -2,6 +2,7 @@ package com.example.schoolquery.engine;
 
 import com.example.schoolquery.metadata.MetadataRegistry;
 import com.example.schoolquery.model.SysModuleField;
+import com.example.schoolquery.plan.FilterExpressionPlan;
 import com.example.schoolquery.plan.LogicalFieldRef;
 import com.example.schoolquery.plan.PlanConditionCompiler;
 import com.example.schoolquery.plan.QueryPlan;
@@ -37,14 +38,26 @@ public final class QueryPlanExecutor {
         if(plan.projections().isEmpty())throw new IllegalArgumentException("SELECT projection must not be empty");
         Map<Long,List<SysModuleField>> requested=resolveProjection(plan.projections());
         FlatGroup tree=treeBuilder.buildFromRoot(plan.rootModuleId(),requested.keySet());
-        Condition condition=conditionCompiler.compile(dsl,plan.rootModuleId(),plan.filterExpression());
-        SelectConditionStep<Record> select=sqlBuilder.build(dsl,tree,requested,condition,null,Map.of());
+        Condition rootCondition=conditionCompiler.compile(dsl,plan.rootModuleId(),plan.filterExpression());
+        Map<Long,Condition> localConditions=buildLocalConditions(dsl,plan.rootModuleId(),plan.filterExpression());
+        SelectConditionStep<Record> select=sqlBuilder.build(dsl,tree,requested,rootCondition,null,Map.of(),localConditions);
         SelectLimitStep<Record> limited=select.orderBy(buildOrderBy(plan));
         Result<Record> rows;
-        if(plan.pagination()==null) rows=limited.fetch();
+        if(plan.pagination()==null)rows=limited.fetch();
         else rows=limited.limit(plan.pagination().pageSize()).offset(plan.pagination().offset()).fetch();
         List<Map<String,Object>> rendered=rows.stream().map(r->renderer.renderRecord(plan.rootModuleId(),tree,r,requested)).toList();
         return new ModuleQueryResult(metadata(plan.projections()),rendered);
+    }
+
+    private Map<Long,Condition> buildLocalConditions(DSLContext dsl,long root,FilterExpressionPlan expression){
+        if(expression==null)return Map.of();
+        Map<Long,Condition> result=new LinkedHashMap<>();
+        for(var module:registry.allModules()){
+            if(module.id()==root||!registry.ancestorChain(module.id()).contains(root)||module.isVirtual())continue;
+            Condition condition=conditionCompiler.compileLocal(dsl,module.id(),expression);
+            result.put(module.id(),condition);
+        }
+        return result;
     }
 
     private Map<Long,List<SysModuleField>> resolveProjection(List<LogicalFieldRef> projections){
@@ -53,13 +66,9 @@ public final class QueryPlanExecutor {
         return result;
     }
     private List<SortField<?>> buildOrderBy(QueryPlan plan){
-        List<SortField<?>> result=new ArrayList<>();
-        for(var item:plan.sort().items()){SysModuleField field=registry.field(item.field().fieldId());Field<Object> column=DynamicFields.field(table(name(field.tableName())),field.columnName());result.add(item.direction()==com.example.schoolquery.plan.SortPlan.Direction.DESC?column.desc():column.asc());}
-        return result;
+        List<SortField<?>> result=new ArrayList<>();for(var item:plan.sort().items()){SysModuleField field=registry.field(item.field().fieldId());Field<Object> column=DynamicFields.field(table(name(field.tableName())),field.columnName());result.add(item.direction()==com.example.schoolquery.plan.SortPlan.Direction.DESC?column.desc():column.asc());}return result;
     }
     private List<ColumnMeta> metadata(List<LogicalFieldRef> projections){
-        List<ColumnMeta> result=new ArrayList<>();
-        for(LogicalFieldRef ref:projections){SysModuleField field=registry.field(ref.fieldId());var module=registry.module(ref.moduleId());result.add(new ColumnMeta(field.id(),module.id(),module.moduleName(),field.tableName(),field.columnName(),FlatGroupSqlBuilder.fieldAlias(field.id()),com.example.schoolquery.model.SysFieldType.UNKNOWN));}
-        return result;
+        List<ColumnMeta> result=new ArrayList<>();for(LogicalFieldRef ref:projections){SysModuleField field=registry.field(ref.fieldId());var module=registry.module(ref.moduleId());result.add(new ColumnMeta(field.id(),module.id(),module.moduleName(),field.tableName(),field.columnName(),FlatGroupSqlBuilder.fieldAlias(field.id()),com.example.schoolquery.model.SysFieldType.UNKNOWN));}return result;
     }
 }
