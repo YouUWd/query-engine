@@ -19,7 +19,6 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 
 class QueryTreeBuilderTest {
-
     private static Connection configConnection;
     private static MetadataRegistry registry;
     private static RelationResolver resolver;
@@ -120,15 +119,11 @@ class QueryTreeBuilderTest {
         assertTrue(resolved.tableJoins().stream().allMatch(j ->
                 j.ownerModuleId() == 103L && j.resolvedModulePath().equals(java.util.List.of(103L))));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
-                j.primaryTable().equals("clazz")
-                        && j.otherTable().equals("student")
-                        && j.primaryColumn().equals("id")
-                        && j.otherColumn().equals("clazz_id")));
+                j.primaryTable().equals("clazz") && j.otherTable().equals("student")
+                        && j.primaryColumn().equals("id") && j.otherColumn().equals("clazz_id")));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
-                j.primaryTable().equals("clazz")
-                        && j.otherTable().equals("student_profile")
-                        && j.primaryColumn().equals("id")
-                        && j.otherColumn().equals("student_id")));
+                j.primaryTable().equals("student") && j.otherTable().equals("student_profile")
+                        && j.primaryColumn().equals("id") && j.otherColumn().equals("student_id")));
     }
 
     @Test
@@ -157,17 +152,14 @@ class QueryTreeBuilderTest {
             MetadataRegistry virtualRegistry = MetadataLoader.load(dsl);
             RelationResolver virtualResolver = new RelationResolver(virtualRegistry);
             QueryTreeBuilder virtualBuilder = new QueryTreeBuilder(virtualRegistry, virtualResolver);
-
             FlatGroup tree = virtualBuilder.buildFromRoot(1L, Set.of(3L));
             assertEquals("student", tree.primaryTable());
             assertEquals(java.util.List.of(1L), tree.mergedModuleIds());
             assertEquals(1, tree.nestedChildren().size());
-
             NestedGroup virtualNested = tree.nestedChildren().get(0);
             assertEquals(2L, virtualNested.childModuleId());
             assertTrue(virtualNested.group().isVirtual());
             assertNull(virtualNested.group().primaryTable());
-
             assertEquals(1, virtualNested.group().nestedChildren().size());
             NestedGroup childAwardNested = virtualNested.group().nestedChildren().get(0);
             assertEquals(3L, childAwardNested.childModuleId());
