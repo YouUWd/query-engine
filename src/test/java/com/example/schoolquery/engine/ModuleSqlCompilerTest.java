@@ -31,6 +31,17 @@ class ModuleSqlCompilerTest {
         assertInstanceOf(com.example.schoolquery.plan.FilterExpressionPlan.Or.class, plan.filterExpression());
         assertEquals(2, plan.filters().size());
         assertEquals(2, plan.pagination().pageNo());
+        assertEquals(20, plan.pagination().offset());
+    }
+
+    @Test
+    void supportsModuleFunctionSourceAndNonPageAlignedOffset() {
+        QueryPlan plan = new ModuleQueryCompiler(registry()).compile(
+                "select f101 from module(1) where f103 >= 18 limit 10 offset 25");
+        assertEquals(1L, plan.rootModuleId());
+        assertEquals(10, plan.pagination().pageSize());
+        assertEquals(25, plan.pagination().offset());
+        assertEquals(3, plan.pagination().pageNo());
     }
 
     @Test
