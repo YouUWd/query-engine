@@ -2,10 +2,8 @@ package com.example.schoolquery.mutation;
 
 import com.example.schoolquery.metadata.MetadataRegistry;
 import com.example.schoolquery.model.SysModuleField;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.Field;
-import org.jooq.Table;
+import org.jooq.*;
+import org.jooq.impl.DSL;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import static org.jooq.impl.DSL.*;
