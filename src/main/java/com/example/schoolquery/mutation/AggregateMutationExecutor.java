@@ -6,6 +6,7 @@ import com.example.schoolquery.model.SysModuleField;
 import com.example.schoolquery.model.SysTableRelation;
 import com.example.schoolquery.relation.RelationResolver;
 import org.jooq.*;
+import org.jooq.impl.DSL;
 import java.util.*;
 import static org.jooq.impl.DSL.*;
 
