@@ -3,6 +3,8 @@ package com.example.schoolquery.querytree;
 import com.example.schoolquery.metadata.MetadataRegistry;
 import com.example.schoolquery.model.ModuleRelationKind;
 import com.example.schoolquery.model.SysModule;
+import com.example.schoolquery.model.SysModuleField;
+import com.example.schoolquery.model.SysTableRelation;
 import com.example.schoolquery.plan.LogicalRelationResolver;
 import com.example.schoolquery.plan.ResolvedRelationPlan;
 import com.example.schoolquery.relation.RelationResolver;
@@ -24,6 +26,36 @@ public class QueryTreeBuilder {
         long lca=findLowestCommonAncestor(touchedModuleIds); long root=registry.module(lca).isVirtual()?registry.nearestRealAncestor(lca).id():lca;
         return buildGroup(root,registry.module(root),computeBackbone(root,touchedModuleIds));
     }
+
+    /**
+     * Resolves only the physical tables actually needed by the requested fields.
+     * The returned tree is immutable and is the only input required by the SQL renderer.
+     */
+    public FlatGroup resolveTableJoins(FlatGroup group, Map<Long, List<SysModuleField>> requestedByModule) {
+        if (group.isVirtual()) return group;
+        LinkedHashMap<String, ResolvedTableJoinPlan> joins = new LinkedHashMap<>();
+        for (long moduleId : group.mergedModuleIds()) {
+            for (SysModuleField field : requestedByModule.getOrDefault(moduleId, List.of())) {
+                if (group.primaryTable().equals(field.tableName())) continue;
+                joins.computeIfAbsent(field.tableName(), table -> resolveTableJoin(group.primaryTable(), table));
+            }
+        }
+        List<NestedGroup> children = new ArrayList<>();
+        for (NestedGroup child : group.nestedChildren()) {
+            children.add(new NestedGroup(child.childModuleId(), child.resolvedRelation(), resolveTableJoins(child.group(), requestedByModule)));
+        }
+        return new FlatGroup(group.primaryTable(), group.mergedModuleIds(), children, new ArrayList<>(joins.values()));
+    }
+
+    private ResolvedTableJoinPlan resolveTableJoin(String primaryTable, String otherTable) {
+        if (resolver == null) throw new IllegalStateException("RelationResolver is required to resolve physical table joins");
+        SysTableRelation rel = resolver.relationOf(primaryTable, otherTable);
+        if (rel.mainTable().equals(primaryTable)) {
+            return new ResolvedTableJoinPlan(primaryTable, otherTable, rel.mainField(), rel.joinField());
+        }
+        return new ResolvedTableJoinPlan(primaryTable, otherTable, rel.joinField(), rel.mainField());
+    }
+
     private long findLowestCommonAncestor(Set<Long> ids) { Iterator<Long> it=ids.iterator(); List<Long> first=registry.ancestorChain(it.next()); Set<Long> common=new LinkedHashSet<>(first); while(it.hasNext()) common.retainAll(new HashSet<>(registry.ancestorChain(it.next()))); if(common.isEmpty()) throw new IllegalStateException("被请求的模块之间没有公共祖先，无法组成一棵查询树"); for(Long c:first) if(common.contains(c)) return c; throw new IllegalStateException("unreachable"); }
     private Set<Long> computeBackbone(long root,Set<Long> ids) { Set<Long> b=new LinkedHashSet<>(); b.add(root); for(long mid:ids) for(long node:registry.ancestorChain(mid)){b.add(node);if(node==root)break;} return b; }
     private FlatGroup buildGroup(long startModuleId,SysModule anchor,Set<Long> backbone) {
