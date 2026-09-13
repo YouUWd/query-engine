@@ -6,6 +6,7 @@ import com.example.schoolquery.mutation.MutationExecutor;
 import com.example.schoolquery.mutation.MutationPlan;
 import com.example.schoolquery.service.PagedFieldDrivenQueryService;
 import org.jooq.DSLContext;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -38,15 +39,16 @@ public final class DefaultModuleSqlEngine implements ModuleSqlEngine {
     @Override
     public List<ColumnMeta> getMetadata(String sql) {
         var plan = compiler.compile(sql);
-        return java.util.stream.IntStream.range(0, plan.projections().size())
-                .mapToObj(i -> {
-                    var ref = plan.projections().get(i);
-                    var f = registry.field(ref.fieldId());
-                    var m = registry.module(ref.moduleId());
-                    return new ColumnMeta(f.id(), m.id(), m.moduleName(), f.tableName(), f.columnName(),
-                            plan.projectionAliases().get(i), com.example.schoolquery.model.SysFieldType.UNKNOWN);
-                })
-                .toList();
+        List<ColumnMeta> result = new ArrayList<>();
+        for (int i = 0; i < plan.projections().size(); i++) {
+            var ref = plan.projections().get(i);
+            var field = registry.field(ref.fieldId());
+            var module = registry.module(ref.moduleId());
+            result.add(new ColumnMeta(field.id(), module.id(), module.moduleName(), field.tableName(),
+                    field.columnName(), plan.projectionAliases().get(i),
+                    com.example.schoolquery.model.SysFieldType.UNKNOWN));
+        }
+        return List.copyOf(result);
     }
 
     @Override
