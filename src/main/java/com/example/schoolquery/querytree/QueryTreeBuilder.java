@@ -6,6 +6,7 @@ import com.example.schoolquery.model.SysModule;
 import com.example.schoolquery.model.SysModuleField;
 import com.example.schoolquery.model.SysTableRelation;
 import com.example.schoolquery.plan.LogicalRelationResolver;
+import com.example.schoolquery.plan.RelationPlan;
 import com.example.schoolquery.plan.ResolvedRelationPlan;
 import com.example.schoolquery.relation.RelationResolver;
 import java.util.*;
@@ -34,9 +35,7 @@ public class QueryTreeBuilder {
         return buildGroup(rootModuleId, registry.module(rootModuleId), computeBackbone(rootModuleId, touchedModuleIds));
     }
 
-    /** Builds the logical module tree and then resolves physical joins using requested fields. */
-    public FlatGroup buildResolvedFromRoot(long rootModuleId,
-                                           Map<Long, List<SysModuleField>> requestedByModule) {
+    public FlatGroup buildResolvedFromRoot(long rootModuleId, Map<Long, List<SysModuleField>> requestedByModule) {
         Objects.requireNonNull(requestedByModule, "requestedByModule");
         FlatGroup tree = buildFromRoot(rootModuleId, requestedByModule.keySet());
         return resolveTableJoins(tree, requestedByModule);
@@ -55,14 +54,11 @@ public class QueryTreeBuilder {
         return resolveTableJoins(tree, requestedByModule);
     }
 
-    /**
-     * Resolves physical table joins in the context of the already-built module tree.
-     * A table pair is not the identity of a join; the owning module and its path are.
-     */
+    /** Resolves physical table joins in the context of the already-built module tree. */
     public FlatGroup resolveTableJoins(FlatGroup group, Map<Long, List<SysModuleField>> requestedByModule) {
         if (group.isVirtual()) return group;
 
-        LinkedHashMap<String, ResolvedTableJoinPlan> joinsByTable = new LinkedHashMap<>();
+        LinkedHashMap<String, ResolvedTableJoinPlan> joinsByEdge = new LinkedHashMap<>();
         for (long moduleId : group.mergedModuleIds()) {
             SysModule module = registry.module(moduleId);
             String modulePrimaryTable = module.primaryTable();
@@ -71,48 +67,65 @@ public class QueryTreeBuilder {
                         + " 中模块 " + moduleId + " 的主表 " + modulePrimaryTable
                         + " 与组主表 " + group.primaryTable() + " 不一致");
             }
-
             for (SysModuleField field : requestedByModule.getOrDefault(moduleId, List.of())) {
                 if (modulePrimaryTable.equals(field.tableName())) continue;
-
-                ResolvedTableJoinPlan candidate = resolveTableJoin(moduleId, field.tableName());
-                ResolvedTableJoinPlan previous = joinsByTable.putIfAbsent(field.tableName(), candidate);
-                if (previous != null && !sameJoin(previous, candidate)) {
-                    throw new IllegalStateException("模块树下物理表 JOIN 不自洽：模块 "
-                            + previous.ownerModuleId() + " 与模块 " + candidate.ownerModuleId()
-                            + " 都需要连接表 " + field.tableName()
-                            + "，但连接上下文或连接键不同（" + previous.resolvedModulePath()
-                            + ": " + previous.primaryColumn() + "=" + previous.otherColumn()
-                            + " vs " + candidate.resolvedModulePath() + ": "
-                            + candidate.primaryColumn() + "=" + candidate.otherColumn() + "）");
+                for (ResolvedTableJoinPlan candidate : resolveTableJoinPath(moduleId, field.tableName())) {
+                    String edgeKey = candidate.primaryTable() + "->" + candidate.otherTable();
+                    ResolvedTableJoinPlan previous = joinsByEdge.putIfAbsent(edgeKey, candidate);
+                    if (previous != null && !sameJoin(previous, candidate)) {
+                        throw new IllegalStateException("模块树下物理表 JOIN 不自洽：模块 "
+                                + previous.ownerModuleId() + " 与模块 " + candidate.ownerModuleId()
+                                + " 都需要连接边 " + edgeKey + "，但连接上下文或连接键不同");
+                    }
                 }
             }
         }
 
         List<NestedGroup> children = new ArrayList<>();
         for (NestedGroup child : group.nestedChildren()) {
-            children.add(new NestedGroup(
-                    child.childModuleId(),
-                    child.resolvedRelation(),
+            children.add(new NestedGroup(child.childModuleId(), child.resolvedRelation(),
                     resolveTableJoins(child.group(), requestedByModule)));
         }
-        return new FlatGroup(group.primaryTable(), group.mergedModuleIds(), children, new ArrayList<>(joinsByTable.values()));
+        return new FlatGroup(group.primaryTable(), group.mergedModuleIds(), children,
+                new ArrayList<>(joinsByEdge.values()));
     }
 
-    /** Resolve the physical edge only after the module tree has established its owner context. */
-    private ResolvedTableJoinPlan resolveTableJoin(long moduleId, String otherTable) {
+    /** Resolve every physical edge required by a module field, including multi-hop paths. */
+    private List<ResolvedTableJoinPlan> resolveTableJoinPath(long moduleId, String otherTable) {
         if (resolver == null) throw new IllegalStateException("RelationResolver is required to resolve physical table joins");
         SysModule module = registry.module(moduleId);
-        SysTableRelation rel = resolver.relationOfModule(moduleId, otherTable);
-        String primaryTable = module.primaryTable();
+        List<SysTableRelation> path = resolver.relationPathOfModule(moduleId, otherTable);
         List<Long> modulePath = new ArrayList<>(registry.ancestorChain(moduleId));
         Collections.reverse(modulePath);
-        if (rel.mainTable().equals(primaryTable)) {
-            return new ResolvedTableJoinPlan(moduleId, modulePath, primaryTable, otherTable,
-                    rel.mainField(), rel.joinField());
+
+        List<ResolvedTableJoinPlan> result = new ArrayList<>();
+        String currentTable = module.primaryTable();
+        for (SysTableRelation relation : path) {
+            String nextTable = adjacentTable(relation, currentTable);
+            if (nextTable == null) {
+                throw new IllegalStateException("模块 " + moduleId + " 的关系路径出现断裂：当前表 "
+                        + currentTable + " 不在关系 " + relation.mainTable() + " -> " + relation.joinTable() + " 中");
+            }
+            String currentColumn;
+            String nextColumn;
+            if (relation.mainTable().equals(currentTable)) {
+                currentColumn = relation.mainField();
+                nextColumn = relation.joinField();
+            } else {
+                currentColumn = relation.joinField();
+                nextColumn = relation.mainField();
+            }
+            result.add(new ResolvedTableJoinPlan(moduleId, modulePath, currentTable, nextTable,
+                    currentColumn, nextColumn));
+            currentTable = nextTable;
         }
-        return new ResolvedTableJoinPlan(moduleId, modulePath, primaryTable, otherTable,
-                rel.joinField(), rel.mainField());
+        return result;
+    }
+
+    private String adjacentTable(SysTableRelation relation, String table) {
+        if (relation.mainTable().equals(table)) return relation.joinTable();
+        if (relation.joinTable().equals(table)) return relation.mainTable();
+        return null;
     }
 
     private boolean sameJoin(ResolvedTableJoinPlan left, ResolvedTableJoinPlan right) {
@@ -152,9 +165,7 @@ public class QueryTreeBuilder {
         List<NestedGroup> nested = new ArrayList<>();
         if (!start.isVirtual()) merged.add(start.id());
         processChildren(start.isVirtual() ? anchor : start, start, backbone, merged, nested);
-        if (merged.isEmpty() && !start.isVirtual()) {
-            throw new IllegalStateException("模块组 " + startModuleId + " 没有真实物理模块");
-        }
+        if (merged.isEmpty() && !start.isVirtual()) throw new IllegalStateException("模块组 " + startModuleId + " 没有真实物理模块");
         return new FlatGroup(start.isVirtual() ? null : start.primaryTable(), merged, nested);
     }
 
@@ -178,8 +189,7 @@ public class QueryTreeBuilder {
     }
 
     private ResolvedRelationPlan virtualRelation(SysModule anchor, SysModule virtual) {
-        return new ResolvedRelationPlan(anchor.id(), virtual.id(),
-                com.example.schoolquery.plan.RelationPlan.RelationType.ONE_TO_ONE,
+        return new ResolvedRelationPlan(anchor.id(), virtual.id(), RelationPlan.RelationType.ONE_TO_ONE,
                 anchor.primaryTable(), "", anchor.primaryTable(), "");
     }
 }
