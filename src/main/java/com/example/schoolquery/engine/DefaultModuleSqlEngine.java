@@ -54,6 +54,7 @@ public final class DefaultModuleSqlEngine implements ModuleSqlEngine {
     @Override
     public ModuleUpdateResult executeUpdate(DSLContext dsl, String sql) {
         MutationPlan plan = mutationCompiler.compile(sql);
-        return new ModuleUpdateResult(mutationExecutor.execute(dsl, plan), List.of());
+        var result = mutationExecutor.executeWithResult(dsl, plan);
+        return new ModuleUpdateResult(result.affectedRows(), result.generatedKeys());
     }
 }
