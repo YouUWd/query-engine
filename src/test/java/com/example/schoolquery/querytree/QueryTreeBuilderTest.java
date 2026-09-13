@@ -119,8 +119,8 @@ class QueryTreeBuilderTest {
         assertTrue(resolved.tableJoins().stream().allMatch(j ->
                 j.ownerModuleId() == 103L && j.resolvedModulePath().equals(java.util.List.of(103L))));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
-                j.primaryTable().equals("clazz") && j.otherTable().equals("student")
-                        && j.primaryColumn().equals("id") && j.otherColumn().equals("clazz_id")));
+                j.primaryTable().equals("student") && j.otherTable().equals("clazz")
+                        && j.primaryColumn().equals("clazz_id") && j.otherColumn().equals("id")));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
                 j.primaryTable().equals("student") && j.otherTable().equals("student_profile")
                         && j.primaryColumn().equals("id") && j.otherColumn().equals("student_id")));
@@ -128,11 +128,11 @@ class QueryTreeBuilderTest {
 
     @Test
     void relationResolverRequiresModuleContextForInternalJoin() {
-        var moduleRelation = resolver.relationOfModule(103L, "student");
-        assertEquals("clazz", moduleRelation.mainTable());
-        assertEquals("student", moduleRelation.joinTable());
-        assertEquals("id", moduleRelation.mainField());
-        assertEquals("clazz_id", moduleRelation.joinField());
+        var moduleRelation = resolver.relationOfModule(103L, "clazz");
+        assertEquals("student", moduleRelation.mainTable());
+        assertEquals("clazz", moduleRelation.joinTable());
+        assertEquals("clazz_id", moduleRelation.mainField());
+        assertEquals("id", moduleRelation.joinField());
     }
 
     @Test
