@@ -4,8 +4,7 @@ import com.example.schoolquery.metadata.MetadataRegistry;
 import com.example.schoolquery.metadata.MetadataValidationException;
 import com.example.schoolquery.model.*;
 
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * 新规则："同一模块内，主表与关联表只能是 1:1 / N:1；1:N 必须拆成子模块。"
@@ -22,11 +21,6 @@ public class RelationResolver {
         this.registry = registry;
     }
 
-    /**
-     * 校验单个模块是否遵守新规则：primary_table 与该模块字段里出现的每一张其它表，
-     * 关系必须是 1:1 或 N:1（即 primaryTable 是 main_table 且 1:1，或 primaryTable
-     * 是 join_table）。发现 1:N 就说明这张表配错了模块，应该拆成子模块。
-     */
     public void validateModule(SysModule module) {
         List<String> tables = registry.fieldsGroupedByTable(module.id()).keySet().stream().toList();
         for (String table : tables) {
@@ -41,18 +35,12 @@ public class RelationResolver {
         }
     }
 
-    /** 对 registry 里的每个模块跑一遍 validateModule，建议在应用启动时调用一次。 */
     public void validateAllModules() {
         for (SysModule m : registry.allModules()) {
             validateModule(m);
         }
     }
 
-    /**
-     * 推断父子模块之间的关系。按新规则，合法结果只有两种；FLAT(1:1) 理论上不应该
-     * 出现在跨模块场景——如果出现了，说明有人把一个本该合并进同一模块的 1:1/N:1
-     * 关联错误地拆成了父子模块，直接报错提醒去修配置。
-     */
     public ModuleRelationKind resolveParentChild(SysModule parent, SysModule child) {
         if (parent.primaryTable().equals(child.primaryTable())) {
             return ModuleRelationKind.SAME_ENTITY;
@@ -68,11 +56,13 @@ public class RelationResolver {
 
     /**
      * 按“模块上下文 + 目标物理表”解析模块内部关系。
+     * 调用方必须先由模块树确定 ownerModule；这里不接受两个裸表名作为唯一语义入口。
      *
-     * <p>调用方必须先由模块树确定 ownerModule；这里不接受两个裸表名作为唯一语义入口。
-     * 返回的仍然是底层物理关系，具体方向由上层 resolved plan 按模块上下文确定。</p>
+     * <p>当目标表不是 primary_table 的直接关系时，返回从模块主表到目标表的唯一最短
+     * 物理关系路径。路径上的每一条边都必须来自 sys_table_relation；若存在多条等长
+     * 最短路径，则认为元数据不足以唯一确定 JOIN，直接失败。</p>
      */
-    public SysTableRelation relationOfModule(long ownerModuleId, String otherTable) {
+    public List<SysTableRelation> relationPathOfModule(long ownerModuleId, String otherTable) {
         SysModule owner = registry.module(ownerModuleId);
         if (owner.isVirtual()) {
             throw new MetadataValidationException("虚拟模块 " + ownerModuleId + " 不能拥有物理表 JOIN");
@@ -83,10 +73,65 @@ public class RelationResolver {
         if (owner.primaryTable().equals(otherTable)) {
             throw new IllegalArgumentException("关联表 " + otherTable + " 与模块 " + ownerModuleId + " 的主表相同");
         }
-        return relationOf(owner.primaryTable(), otherTable);
+
+        record State(String table, List<SysTableRelation> path) {}
+        Deque<State> queue = new ArrayDeque<>();
+        Map<String, Integer> distance = new HashMap<>();
+        Map<String, Integer> shortestPathCount = new HashMap<>();
+        queue.add(new State(owner.primaryTable(), List.of()));
+        distance.put(owner.primaryTable(), 0);
+        shortestPathCount.put(owner.primaryTable(), 1);
+        State found = null;
+        while (!queue.isEmpty()) {
+            State current = queue.removeFirst();
+            int nextDistance = current.path().size() + 1;
+            for (SysTableRelation relation : registry.allRelations()) {
+                String next = adjacentTable(relation, current.table());
+                if (next == null) continue;
+                List<SysTableRelation> nextPath = new ArrayList<>(current.path());
+                nextPath.add(relation);
+                Integer known = distance.get(next);
+                if (known == null) {
+                    distance.put(next, nextDistance);
+                    shortestPathCount.put(next, shortestPathCount.getOrDefault(current.table(), 1));
+                    State state = new State(next, List.copyOf(nextPath));
+                    if (next.equals(otherTable)) found = state;
+                    queue.addLast(state);
+                } else if (known == nextDistance) {
+                    shortestPathCount.merge(next, shortestPathCount.getOrDefault(current.table(), 1), Integer::sum);
+                    if (next.equals(otherTable)) {
+                        throw new MetadataValidationException("模块 " + ownerModuleId + " 的主表 "
+                                + owner.primaryTable() + " 到关联表 " + otherTable
+                                + " 存在多条等长物理关系路径，无法唯一确定 JOIN");
+                    }
+                }
+            }
+            if (found != null && current.path().size() + 1 > found.path().size()) break;
+        }
+        if (found == null) {
+            throw new MetadataValidationException("模块 " + ownerModuleId + " 的主表 "
+                    + owner.primaryTable() + " 与关联表 " + otherTable + " 之间没有可用关系路径");
+        }
+        return found.path();
     }
 
-    /** 取出两张表之间的底层关系配置。调用方应已完成模块语义解析。 */
+    /** Compatibility API for callers that only need a direct relation. */
+    public SysTableRelation relationOfModule(long ownerModuleId, String otherTable) {
+        List<SysTableRelation> path = relationPathOfModule(ownerModuleId, otherTable);
+        if (path.size() != 1) {
+            throw new MetadataValidationException("模块 " + ownerModuleId + " 的表 " + otherTable
+                    + " 不是主表的直接关联表，请使用 relationPathOfModule 获取完整 JOIN 路径");
+        }
+        return path.get(0);
+    }
+
+    private String adjacentTable(SysTableRelation relation, String table) {
+        if (relation.mainTable().equals(table)) return relation.joinTable();
+        if (relation.joinTable().equals(table)) return relation.mainTable();
+        return null;
+    }
+
+    /** 取出两张表之间的底层直接关系。调用方应已完成模块语义解析。 */
     public SysTableRelation relationOf(String tableA, String tableB) {
         Optional<SysTableRelation> rel = registry.findRelation(tableA, tableB);
         return rel.orElseThrow(() -> new MetadataValidationException(
