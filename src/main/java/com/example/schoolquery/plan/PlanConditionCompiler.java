@@ -7,6 +7,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import java.util.*;
 import static org.jooq.impl.DSL.*;
 
