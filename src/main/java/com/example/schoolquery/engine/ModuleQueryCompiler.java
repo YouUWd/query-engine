@@ -29,11 +29,11 @@ public final class ModuleQueryCompiler {
             if ("*".equals(projection.expression())) {
                 List<LogicalFieldRef> expanded = allVisible(root.id());
                 projections.addAll(expanded);
-                expanded.forEach(ref -> aliases.add("f" + ref.fieldId()));
+                expanded.forEach(ref -> aliases.add(registry.field(ref.fieldId()).columnName()));
             } else {
                 LogicalFieldRef ref = resolve(root.id(), projection.expression());
                 projections.add(ref);
-                aliases.add(projection.alias() == null ? "f" + ref.fieldId() : projection.alias());
+                aliases.add(projection.alias() == null ? registry.field(ref.fieldId()).columnName() : projection.alias());
             }
         }
 
