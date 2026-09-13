@@ -120,10 +120,24 @@ public final class AggregateMutationExecutor {
 
     private Object generatedKey(DSLContext dsl, Table<?> table, Map<Field<Object>, Object> values, SysModule module) {
         SysModuleField pk = primaryKeyField(module);
-        Field<Object> keyField = pk == null ? null : field(pk);
-        if (pk == null || values.containsKey(keyField)) {
+        if (pk == null) {
             dsl.insertInto(table).set(values).execute();
-            return pk == null ? null : values.get(keyField);
+            return null;
+        }
+
+        // The mutation is expressed in logical FieldIds, while the jOOQ map is keyed by
+        // freshly-created Field objects. Do not use Field.equals() to detect an explicit PK;
+        // it would couple generated-key semantics to jOOQ's implementation details.
+        boolean explicitPrimaryKey = values.keySet().stream()
+                .anyMatch(f -> pk.columnName().equalsIgnoreCase(f.getName()));
+        Field<Object> keyField = field(pk);
+        if (explicitPrimaryKey) {
+            dsl.insertInto(table).set(values).execute();
+            return values.entrySet().stream()
+                    .filter(e -> pk.columnName().equalsIgnoreCase(e.getKey().getName()))
+                    .map(Map.Entry::getValue)
+                    .findFirst()
+                    .orElse(null);
         }
         return dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);
     }
