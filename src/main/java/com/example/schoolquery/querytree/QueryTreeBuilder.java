@@ -31,26 +31,33 @@ public class QueryTreeBuilder {
                 throw new IllegalArgumentException("字段所属模块 " + mid + " 不是根模块 " + rootModuleId + " 的子孙（或自身）");
             }
         }
-        FlatGroup tree = buildGroup(rootModuleId, registry.module(rootModuleId), computeBackbone(rootModuleId, touchedModuleIds));
-        return resolveTableJoins(tree, fieldsForModules(tree.mergedModuleIds()));
+        return buildGroup(rootModuleId, registry.module(rootModuleId), computeBackbone(rootModuleId, touchedModuleIds));
+    }
+
+    /** Builds the logical module tree and then resolves physical joins using requested fields. */
+    public FlatGroup buildResolvedFromRoot(long rootModuleId,
+                                           Map<Long, List<SysModuleField>> requestedByModule) {
+        Objects.requireNonNull(requestedByModule, "requestedByModule");
+        FlatGroup tree = buildFromRoot(rootModuleId, requestedByModule.keySet());
+        return resolveTableJoins(tree, requestedByModule);
     }
 
     public FlatGroup buildAutoRoot(Set<Long> touchedModuleIds) {
         if (touchedModuleIds.isEmpty()) throw new IllegalArgumentException("字段列表为空，无法推断查询根节点");
         long lca = findLowestCommonAncestor(touchedModuleIds);
         long root = registry.module(lca).isVirtual() ? registry.nearestRealAncestor(lca).id() : lca;
-        FlatGroup tree = buildGroup(root, registry.module(root), computeBackbone(root, touchedModuleIds));
-        return resolveTableJoins(tree, fieldsForModules(tree.mergedModuleIds()));
+        return buildGroup(root, registry.module(root), computeBackbone(root, touchedModuleIds));
+    }
+
+    public FlatGroup buildResolvedAutoRoot(Map<Long, List<SysModuleField>> requestedByModule) {
+        Objects.requireNonNull(requestedByModule, "requestedByModule");
+        FlatGroup tree = buildAutoRoot(requestedByModule.keySet());
+        return resolveTableJoins(tree, requestedByModule);
     }
 
     /**
      * Resolves physical table joins in the context of the already-built module tree.
-     *
-     * <p>A table pair is deliberately not treated as the identity of a join. The
-     * module owning the requested field determines which primary-table relation is
-     * applicable. If two logical modules in the same flattened group require the
-     * same physical table with different join keys, the metadata is inconsistent
-     * for a single SQL row and we fail instead of silently choosing one.</p>
+     * A table pair is not the identity of a join; the owning module and its path are.
      */
     public FlatGroup resolveTableJoins(FlatGroup group, Map<Long, List<SysModuleField>> requestedByModule) {
         if (group.isVirtual()) return group;
@@ -72,10 +79,12 @@ public class QueryTreeBuilder {
                 ResolvedTableJoinPlan previous = joinsByTable.putIfAbsent(field.tableName(), candidate);
                 if (previous != null && !sameJoin(previous, candidate)) {
                     throw new IllegalStateException("模块树下物理表 JOIN 不自洽：模块 "
-                            + previous.sourceModuleId() + " 与模块 " + candidate.sourceModuleId()
+                            + previous.ownerModuleId() + " 与模块 " + candidate.ownerModuleId()
                             + " 都需要连接表 " + field.tableName()
-                            + "，但连接键不同（" + previous.primaryColumn() + "=" + previous.otherColumn()
-                            + " vs " + candidate.primaryColumn() + "=" + candidate.otherColumn() + "）");
+                            + "，但连接上下文或连接键不同（" + previous.resolvedModulePath()
+                            + ": " + previous.primaryColumn() + "=" + previous.otherColumn()
+                            + " vs " + candidate.resolvedModulePath() + ": "
+                            + candidate.primaryColumn() + "=" + candidate.otherColumn() + "）");
                 }
             }
         }
@@ -94,29 +103,23 @@ public class QueryTreeBuilder {
     private ResolvedTableJoinPlan resolveTableJoin(long moduleId, String primaryTable, String otherTable) {
         if (resolver == null) throw new IllegalStateException("RelationResolver is required to resolve physical table joins");
         SysTableRelation rel = resolver.relationOf(primaryTable, otherTable);
+        List<Long> modulePath = new ArrayList<>(registry.ancestorChain(moduleId));
+        Collections.reverse(modulePath);
         if (rel.mainTable().equals(primaryTable)) {
-            return new ResolvedTableJoinPlan(moduleId, moduleId, primaryTable, otherTable,
+            return new ResolvedTableJoinPlan(moduleId, modulePath, primaryTable, otherTable,
                     rel.mainField(), rel.joinField());
         }
-        return new ResolvedTableJoinPlan(moduleId, moduleId, primaryTable, otherTable,
+        return new ResolvedTableJoinPlan(moduleId, modulePath, primaryTable, otherTable,
                 rel.joinField(), rel.mainField());
     }
 
     private boolean sameJoin(ResolvedTableJoinPlan left, ResolvedTableJoinPlan right) {
-        return left.primaryTable().equals(right.primaryTable())
+        return left.ownerModuleId() == right.ownerModuleId()
+                && left.resolvedModulePath().equals(right.resolvedModulePath())
+                && left.primaryTable().equals(right.primaryTable())
                 && left.otherTable().equals(right.otherTable())
                 && left.primaryColumn().equals(right.primaryColumn())
                 && left.otherColumn().equals(right.otherColumn());
-    }
-
-    private Map<Long, List<SysModuleField>> fieldsForModules(List<Long> moduleIds) {
-        Map<Long, List<SysModuleField>> fields = new LinkedHashMap<>();
-        for (long moduleId : moduleIds) {
-            fields.put(moduleId, registry.fieldsGroupedByTable(moduleId).values().stream()
-                    .flatMap(Collection::stream)
-                    .toList());
-        }
-        return fields;
     }
 
     private long findLowestCommonAncestor(Set<Long> ids) {
