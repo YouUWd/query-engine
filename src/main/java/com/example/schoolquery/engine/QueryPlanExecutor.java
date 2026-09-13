@@ -12,7 +12,12 @@ import com.example.schoolquery.relation.RelationResolver;
 import com.example.schoolquery.render.RecordRenderer;
 import com.example.schoolquery.sql.DynamicFields;
 import com.example.schoolquery.sql.FlatGroupSqlBuilder;
-import org.jooq.*;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Result;
+import org.jooq.SortField;
+import org.jooq.Table;
 import org.jooq.Record;
 import java.util.*;
 import static org.jooq.impl.DSL.*;
@@ -45,7 +50,7 @@ public final class QueryPlanExecutor {
         Condition rootCondition = conditionCompiler.compile(dsl, plan.rootModuleId(), plan.filterExpression());
         Map<Long, Condition> localConditions = buildLocalConditions(dsl, plan.rootModuleId(), plan.filterExpression());
 
-        SelectConditionStep<Record> select = sqlBuilder.build(
+        var select = sqlBuilder.build(
                 dsl, tree, requested, rootCondition, null, Map.of(), localConditions);
         List<SortField<?>> orderBy = buildOrderBy(plan, tree);
         Result<Record> rows;
@@ -54,8 +59,6 @@ public final class QueryPlanExecutor {
                     ? select.fetch()
                     : select.limit(plan.pagination().pageSize()).offset(plan.pagination().offset()).fetch();
         } else {
-            // Do not assign the result of orderBy() to SelectOrderByStep: in jOOQ 3.19
-            // the concrete type returned by this overload is SelectSeekStepN.
             var ordered = select.orderBy(orderBy);
             rows = plan.pagination() == null
                     ? ordered.fetch()
