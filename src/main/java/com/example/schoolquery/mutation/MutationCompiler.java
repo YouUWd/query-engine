@@ -52,12 +52,18 @@ public final class MutationCompiler {
             matcher.appendReplacement(result, Matcher.quoteReplacement("`" + module.primaryTable() + "`"));
         }
         matcher.appendTail(result);
-        if (!found) throw new IllegalArgumentException("Mutation SQL must target module(...)");
-        return result.toString();
+        return found ? result.toString() : sql;
+    }
+
+    private SysModule moduleForTable(String rawTable) {
+        String table = rawTable == null ? "" : rawTable.replace("`", "");
+        for (SysModule module : registry.allModules())
+            if (!module.isVirtual() && module.primaryTable().equalsIgnoreCase(table)) return module;
+        throw new IllegalArgumentException("Unknown module physical table: " + rawTable);
     }
 
     private MutationPlan compileInsert(Insert insert) {
-        SysModule module = registry.module(insert.getTable().getName());
+        SysModule module = moduleForTable(insert.getTable().getName());
         if (insert.getColumns() == null || insert.getColumns().isEmpty()) throw new IllegalArgumentException("INSERT must specify columns");
         Select select = insert.getSelect();
         if (select == null) throw new IllegalArgumentException("INSERT must specify VALUES");
@@ -74,7 +80,7 @@ public final class MutationCompiler {
     }
 
     private MutationPlan compileUpdate(Update update) {
-        SysModule module = registry.module(update.getTable().getName());
+        SysModule module = moduleForTable(update.getTable().getName());
         List<MutationPlan.Assignment> a = new ArrayList<>();
         for (int i = 0; i < update.getColumns().size(); i++)
             a.add(new MutationPlan.Assignment(resolve(module.id(), update.getColumns().get(i).getColumnName()), literal(update.getExpressions().get(i).toString())));
@@ -82,7 +88,7 @@ public final class MutationCompiler {
     }
 
     private MutationPlan compileDelete(Delete delete) {
-        SysModule module = registry.module(delete.getTable().getName());
+        SysModule module = moduleForTable(delete.getTable().getName());
         return new MutationPlan(MutationPlan.Operation.DELETE, module.id(), List.of(), List.of(), where(module.id(), delete.getWhere()));
     }
 
