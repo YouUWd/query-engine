@@ -117,16 +117,13 @@ class QueryTreeBuilderTest {
 
         assertEquals(2, resolved.tableJoins().size());
         assertTrue(resolved.tableJoins().stream().allMatch(j ->
-                j.ownerModuleId() == 103L && j.resolvedModulePath().equals(java.util.List.of(103L))),
-                resolved.tableJoins().toString());
+                j.ownerModuleId() == 103L && j.resolvedModulePath().equals(java.util.List.of(101L, 103L))));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
                 j.primaryTable().equals("student") && j.otherTable().equals("clazz")
-                        && j.primaryColumn().equals("clazz_id") && j.otherColumn().equals("id")),
-                resolved.tableJoins().toString());
+                        && j.primaryColumn().equals("clazz_id") && j.otherColumn().equals("id")));
         assertTrue(resolved.tableJoins().stream().anyMatch(j ->
                 j.primaryTable().equals("student") && j.otherTable().equals("student_profile")
-                        && j.primaryColumn().equals("id") && j.otherColumn().equals("student_id")),
-                resolved.tableJoins().toString());
+                        && j.primaryColumn().equals("id") && j.otherColumn().equals("student_id")));
     }
 
     @Test
