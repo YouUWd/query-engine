@@ -75,7 +75,7 @@ public class QueryTreeBuilder {
             for (SysModuleField field : requestedByModule.getOrDefault(moduleId, List.of())) {
                 if (modulePrimaryTable.equals(field.tableName())) continue;
 
-                ResolvedTableJoinPlan candidate = resolveTableJoin(moduleId, modulePrimaryTable, field.tableName());
+                ResolvedTableJoinPlan candidate = resolveTableJoin(moduleId, field.tableName());
                 ResolvedTableJoinPlan previous = joinsByTable.putIfAbsent(field.tableName(), candidate);
                 if (previous != null && !sameJoin(previous, candidate)) {
                     throw new IllegalStateException("模块树下物理表 JOIN 不自洽：模块 "
@@ -99,10 +99,12 @@ public class QueryTreeBuilder {
         return new FlatGroup(group.primaryTable(), group.mergedModuleIds(), children, new ArrayList<>(joinsByTable.values()));
     }
 
-    /** Resolve a table relation only after the owning module has been established by the module tree. */
-    private ResolvedTableJoinPlan resolveTableJoin(long moduleId, String primaryTable, String otherTable) {
+    /** Resolve the physical edge only after the module tree has established its owner context. */
+    private ResolvedTableJoinPlan resolveTableJoin(long moduleId, String otherTable) {
         if (resolver == null) throw new IllegalStateException("RelationResolver is required to resolve physical table joins");
-        SysTableRelation rel = resolver.relationOf(primaryTable, otherTable);
+        SysModule module = registry.module(moduleId);
+        SysTableRelation rel = resolver.relationOfModule(moduleId, otherTable);
+        String primaryTable = module.primaryTable();
         List<Long> modulePath = new ArrayList<>(registry.ancestorChain(moduleId));
         Collections.reverse(modulePath);
         if (rel.mainTable().equals(primaryTable)) {
