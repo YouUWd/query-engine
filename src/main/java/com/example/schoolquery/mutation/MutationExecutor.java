@@ -37,15 +37,11 @@ public final class MutationExecutor {
         }
 
         SysModuleField primaryKey = primaryKeyField(plan.rootModuleId());
-        if (primaryKey == null) {
+        if (primaryKey == null || plan.assignments().stream().anyMatch(a -> a.field().fieldId() == primaryKey.id())) {
             return new MutationExecutionResult(dsl.insertInto(table).set(values).execute(), List.of());
         }
 
         Field<Object> keyField = field(primaryKey);
-        if (values.containsKey(keyField)) {
-            return new MutationExecutionResult(dsl.insertInto(table).set(values).execute(), List.of());
-        }
-
         Object generatedKey = dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);
         return new MutationExecutionResult(1, generatedKey == null ? List.of() : List.of(generatedKey));
     }
