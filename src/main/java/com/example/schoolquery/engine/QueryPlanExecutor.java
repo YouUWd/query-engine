@@ -54,7 +54,9 @@ public final class QueryPlanExecutor {
                     ? select.fetch()
                     : select.limit(plan.pagination().pageSize()).offset(plan.pagination().offset()).fetch();
         } else {
-            SelectOrderByStep<Record> ordered = select.orderBy(orderBy);
+            // Do not assign the result of orderBy() to SelectOrderByStep: in jOOQ 3.19
+            // the concrete type returned by this overload is SelectSeekStepN.
+            var ordered = select.orderBy(orderBy);
             rows = plan.pagination() == null
                     ? ordered.fetch()
                     : ordered.limit(plan.pagination().pageSize()).offset(plan.pagination().offset()).fetch();
