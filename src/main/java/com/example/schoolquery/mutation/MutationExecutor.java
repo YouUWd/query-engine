@@ -113,29 +113,26 @@ public final class MutationExecutor {
         validatePrimaryWhere(plan.where(), module);
 
         List<MutationPlan.Assignment> root = groups.remove(key(module.primaryTable()));
-        boolean hasSecondaryAssignments = !groups.isEmpty();
-
         Condition rootCondition = condition(plan.where());
         int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), rootCondition);
 
-        // Secondary 1:1 updates are correlated to the same root row set with a
-        // correlated EXISTS. Unlike fetching relation keys into Java or relying
-        // on an IN subquery's inferred type, this keeps the relation as a pure
-        // column-to-column predicate and lets the database resolve both column
-        // types. It also makes the correlation explicit in the generated SQL.
+        // Secondary 1:1 updates are constrained by a scalar subquery over the
+        // exact root row set. The subquery keeps both sides as database fields,
+        // avoiding Java-side key extraction and JDBC IN-list type inference.
+        // This also avoids relying on an UPDATE-target reference from a nested
+        // EXISTS, which behaves differently across SQL dialects.
         for (List<MutationPlan.Assignment> secondary : groups.values()) {
             String targetTable = tableOf(secondary);
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
             Field<Object> rootJoin = DSL.field(name(module.primaryTable(), relation.mainField()), Object.class);
             Field<Object> targetJoin = DSL.field(name(targetTable, relation.joinField()), Object.class);
 
-            Condition correlated = rootCondition.and(rootJoin.eq(targetJoin));
+            Select<?> matchingRootKeys = select(rootJoin)
+                    .from(table(name(module.primaryTable())))
+                    .where(rootCondition);
             dsl.update(table(name(targetTable)))
                     .set(assignmentMap(secondary, targetTable))
-                    .where(exists(
-                            selectOne()
-                                    .from(table(name(module.primaryTable())))
-                                    .where(correlated)))
+                    .where(targetJoin.in(matchingRootKeys))
                     .execute();
         }
 
