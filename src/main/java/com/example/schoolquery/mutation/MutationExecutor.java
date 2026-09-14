@@ -51,12 +51,15 @@ public final class MutationExecutor {
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
-            Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
             List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
-            // Relation keys are already values read from the database. Inline them
-            // through jOOQ's typed literal renderer so H2 does not bind an Object/
-            // OTHER parameter for a numeric FK comparison.
             for(Object value:matching){
+                if(value==null) throw new IllegalArgumentException("Scalar 1:1 relation key cannot be null for " + targetTable + "." + relation.joinField());
+                // The relation-key field was deliberately declared as Object above so
+                // metadata does not have to know the JDBC type. Recreate the predicate
+                // with the runtime key type before rendering the inline literal; this
+                // prevents jOOQ from binding a numeric H2 FK as OTHER.
+                @SuppressWarnings("unchecked")
+                Field<Object> targetJoin=(Field<Object>)(Field<?>)DSL.field(name(targetTable,relation.joinField()),value.getClass());
                 dsl.update(table(name(targetTable)))
                         .set(assignmentMap(secondary,targetTable))
                         .where(targetJoin.eq(DSL.inline(value)))
