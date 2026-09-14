@@ -32,13 +32,13 @@ public final class MutationExecutor {
         if(groups.isEmpty())throw new IllegalArgumentException("UPDATE has no assignments");
         List<MutationPlan.Assignment> root=groups.remove(key(module.primaryTable()));
         if(!groups.isEmpty()&&whereTouchesNonPrimaryTable(plan.where(),module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
-        Condition rootCondition=primaryCondition(plan.where(),module);
+        Condition rootCondition=condition(plan.where());
         int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
 
-        // Secondary tables are updated before the root table. The relation predicate is
-        // expressed entirely as a column-to-column subquery, avoiding Java/JDBC type
-        // inference for relation keys and also preserving the original root key set when
-        // the root UPDATE itself changes a primary key.
+        // Update secondary 1:1 tables before the root table. The relation predicate is
+        // expressed as a physical column-to-column subquery, so no Java/JDBC relation-key
+        // type inference is required. Running this before the root UPDATE also preserves
+        // the original relation keys if a root primary-key assignment is present.
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
