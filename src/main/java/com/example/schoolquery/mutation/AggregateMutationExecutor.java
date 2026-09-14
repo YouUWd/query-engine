@@ -76,12 +76,12 @@ public final class AggregateMutationExecutor {
         return count;
     }
 
+    /** Resolve the parent-child FK in the parent's module context, never by a global table pair. */
     private void applyParentForeignKey(SysModule child, SysModule parent, Object parentKey,
                                        Map<SysModuleField, Object> values) {
         if (child.primaryTable().equals(parent.primaryTable())) return;
-        SysTableRelation rel = relations.relationOf(parent.primaryTable(), child.primaryTable());
-        boolean parentIsMain = rel.mainTable().equals(parent.primaryTable());
-        values.putIfAbsent(findColumn(child, parentIsMain ? rel.joinField() : rel.mainField()), parentKey);
+        SysTableRelation rel = relations.relationOfModule(parent.id(), child.primaryTable());
+        values.putIfAbsent(findColumn(child, rel.joinField()), parentKey);
     }
 
     /**
@@ -98,9 +98,8 @@ public final class AggregateMutationExecutor {
         for (List<AggregateMutation> mutations : byModule.values()) {
             SysModule child = registry.module(mutations.get(0).moduleId());
             if (child.primaryTable().equals(parent.primaryTable())) continue;
-            SysTableRelation rel = relations.relationOf(parent.primaryTable(), child.primaryTable());
-            boolean parentIsMain = rel.mainTable().equals(parent.primaryTable());
-            SysModuleField fk = findColumn(child, parentIsMain ? rel.joinField() : rel.mainField());
+            SysTableRelation rel = relations.relationOfModule(parent.id(), child.primaryTable());
+            SysModuleField fk = findColumn(child, rel.joinField());
             SysModuleField pk = primaryKeyField(child);
             if (pk == null) continue;
 
@@ -125,9 +124,6 @@ public final class AggregateMutationExecutor {
             return null;
         }
 
-        // The mutation is expressed in logical FieldIds, while the jOOQ map is keyed by
-        // freshly-created Field objects. Do not use Field.equals() to detect an explicit PK;
-        // it would couple generated-key semantics to jOOQ's implementation details.
         boolean explicitPrimaryKey = values.keySet().stream()
                 .anyMatch(f -> pk.columnName().equalsIgnoreCase(f.getName()));
         Field<Object> keyField = field(pk);
