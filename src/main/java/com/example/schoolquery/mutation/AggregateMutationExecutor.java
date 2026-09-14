@@ -20,17 +20,28 @@ public final class AggregateMutationExecutor {
         this.relations = Objects.requireNonNull(relations);
     }
 
+    /** Backward-compatible count-only API. */
     public int execute(DSLContext dsl, AggregateMutation mutation) {
-        return dsl.transactionResult(c -> apply(c.dsl(), mutation, null, null));
+        return executeWithResult(dsl, mutation).affectedRows();
     }
 
-    private int apply(DSLContext dsl, AggregateMutation m, SysModule parent, Object parentKey) {
+    /** Execute one aggregate atomically and retain generated-key correlation metadata. */
+    public AggregateMutationResult executeWithResult(DSLContext dsl, AggregateMutation mutation) {
+        return dsl.transactionResult(c -> {
+            Collector collector = new Collector();
+            int affected = apply(c.dsl(), mutation, null, null, collector);
+            return new AggregateMutationResult(affected, collector.generatedKeys,
+                    collector.generatedKeysByClientKey);
+        });
+    }
+
+    private int apply(DSLContext dsl, AggregateMutation m, SysModule parent, Object parentKey, Collector collector) {
         SysModule module = registry.module(m.moduleId());
         if (module.isVirtual()) throw new IllegalArgumentException("Cannot mutate virtual module: " + module.id());
         validateFullSyncScope(m, module);
         return switch (m.operation()) {
-            case INSERT -> insert(dsl, m, module, parent, parentKey);
-            case UPDATE -> update(dsl, m, module, parent, parentKey);
+            case INSERT -> insert(dsl, m, module, parent, parentKey, collector);
+            case UPDATE -> update(dsl, m, module, parent, parentKey, collector);
             case DELETE -> delete(dsl, m, module, parent, parentKey);
         };
     }
@@ -48,7 +59,7 @@ public final class AggregateMutationExecutor {
         }
     }
 
-    private int insert(DSLContext dsl, AggregateMutation m, SysModule module, SysModule parent, Object parentKey) {
+    private int insert(DSLContext dsl, AggregateMutation m, SysModule module, SysModule parent, Object parentKey, Collector collector) {
         Map<SysModuleField, Object> values = values(module, m.values());
         if (parent != null && parentKey != null) applyParentForeignKey(module, parent, parentKey, values);
         Table<?> table = table(name(module.primaryTable()));
@@ -56,12 +67,13 @@ public final class AggregateMutationExecutor {
         for (var e : values.entrySet()) map.put(field(e.getKey()), e.getValue());
         if (map.isEmpty()) throw new IllegalArgumentException("Aggregate INSERT has no values for module " + module.id());
         Object key = generatedKey(dsl, table, map, module);
+        collector.record(m.clientKey(), key);
         int count = 1;
-        for (AggregateMutation child : m.children()) count += apply(dsl, child, module, key);
+        for (AggregateMutation child : m.children()) count += apply(dsl, child, module, key, collector);
         return count;
     }
 
-    private int update(DSLContext dsl, AggregateMutation m, SysModule module, SysModule parent, Object parentKey) {
+    private int update(DSLContext dsl, AggregateMutation m, SysModule module, SysModule parent, Object parentKey, Collector collector) {
         Map<SysModuleField, Object> values = values(module, m.values());
         SysModuleField pk = primaryKeyField(module);
         if (pk == null) throw new IllegalArgumentException("Aggregate UPDATE requires a primary key field for module " + module.id());
@@ -73,7 +85,8 @@ public final class AggregateMutationExecutor {
         for (var e : values.entrySet()) map.put(field(e.getKey()), e.getValue());
         Table<?> table = table(name(module.primaryTable()));
         int count = map.isEmpty() ? 0 : dsl.update(table).set(map).where(field(pk).eq(key)).execute();
-        for (AggregateMutation child : m.children()) count += apply(dsl, child, module, key);
+        collector.record(m.clientKey(), key);
+        for (AggregateMutation child : m.children()) count += apply(dsl, child, module, key, collector);
         if (m.saveMode() == AggregateMutation.SaveMode.FULL_SYNC && m.orphanRemoval()) count += removeOrphans(dsl, module, key, m);
         return count;
     }
@@ -88,7 +101,6 @@ public final class AggregateMutationExecutor {
         return deleteByKey(dsl, module, key);
     }
 
-    /** Delete a logical node bottom-up, including descendants not explicitly represented in the mutation payload. */
     private int deleteByKey(DSLContext dsl, SysModule module, Object key) {
         int count = 0;
         for (SysModule child : registry.children(module.id())) {
@@ -107,7 +119,6 @@ public final class AggregateMutationExecutor {
         return count;
     }
 
-    /** Resolve the parent-child FK from the module-tree edge, never from the parent's table set. */
     private void applyParentForeignKey(SysModule child, SysModule parent, Object parentKey, Map<SysModuleField, Object> values) {
         if (child.primaryTable().equals(parent.primaryTable())) return;
         SysTableRelation rel = relations.parentChildRelation(parent, child);
@@ -118,10 +129,7 @@ public final class AggregateMutationExecutor {
     private int removeOrphans(DSLContext dsl, SysModule parent, Object parentKey, AggregateMutation m) {
         Map<Long, List<AggregateMutation>> byModule = new LinkedHashMap<>();
         for (AggregateMutation child : m.children()) byModule.computeIfAbsent(child.moduleId(), ignored -> new ArrayList<>()).add(child);
-
-        Set<Long> scopes = m.fullSyncChildModules().isEmpty()
-                ? byModule.keySet()
-                : m.fullSyncChildModules();
+        Set<Long> scopes = m.fullSyncChildModules().isEmpty() ? byModule.keySet() : m.fullSyncChildModules();
         int count = 0;
         for (long childModuleId : scopes) {
             List<AggregateMutation> mutations = byModule.getOrDefault(childModuleId, List.of());
@@ -147,21 +155,20 @@ public final class AggregateMutationExecutor {
 
     private Object generatedKey(DSLContext dsl, Table<?> table, Map<Field<Object>, Object> values, SysModule module) {
         SysModuleField pk = primaryKeyField(module);
-        if (pk == null) {
-            dsl.insertInto(table).set(values).execute();
-            return null;
-        }
+        if (pk == null) { dsl.insertInto(table).set(values).execute(); return null; }
         boolean explicitPrimaryKey = values.keySet().stream().anyMatch(f -> pk.columnName().equalsIgnoreCase(f.getName()));
         Field<Object> keyField = field(pk);
         if (explicitPrimaryKey) {
             dsl.insertInto(table).set(values).execute();
-            return values.entrySet().stream().filter(e -> pk.columnName().equalsIgnoreCase(e.getKey().getName())).map(Map.Entry::getValue).findFirst().orElse(null);
+            return values.entrySet().stream().filter(e -> pk.columnName().equalsIgnoreCase(e.getKey().getName()))
+                    .map(Map.Entry::getValue).findFirst().orElse(null);
         }
         return dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);
     }
 
     private SysModuleField primaryKeyField(SysModule module) {
-        for (var fs : registry.fieldsGroupedByTable(module.id()).values()) for (SysModuleField f : fs) if ("id".equalsIgnoreCase(f.columnName())) return f;
+        for (var fs : registry.fieldsGroupedByTable(module.id()).values()) for (SysModuleField f : fs)
+            if ("id".equalsIgnoreCase(f.columnName())) return f;
         return null;
     }
 
@@ -169,7 +176,8 @@ public final class AggregateMutationExecutor {
         Map<SysModuleField, Object> r = new LinkedHashMap<>();
         for (var e : input.entrySet()) {
             SysModuleField field = resolve(module, e.getKey());
-            if (!field.tableName().equalsIgnoreCase(module.primaryTable())) throw new IllegalArgumentException("Aggregate mutation field must belong to module primary table: " + e.getKey());
+            if (!field.tableName().equalsIgnoreCase(module.primaryTable()))
+                throw new IllegalArgumentException("Aggregate mutation field must belong to module primary table: " + e.getKey());
             r.put(field, e.getValue());
         }
         return r;
@@ -187,10 +195,20 @@ public final class AggregateMutationExecutor {
 
     private SysModuleField findColumn(SysModule module, String column) {
         List<SysModuleField> r = new ArrayList<>();
-        for (var fs : registry.fieldsGroupedByTable(module.id()).values()) for (SysModuleField f : fs) if (f.columnName().equalsIgnoreCase(column)) r.add(f);
+        for (var fs : registry.fieldsGroupedByTable(module.id()).values()) for (SysModuleField f : fs)
+            if (f.columnName().equalsIgnoreCase(column)) r.add(f);
         if (r.size() != 1) throw new IllegalArgumentException("Unknown or ambiguous column '" + column + "' in module " + module.id());
         return r.get(0);
     }
 
     private Field<Object> field(SysModuleField meta) { return DSL.field(name(meta.tableName(), meta.columnName()), Object.class); }
+
+    private static final class Collector {
+        private final List<Object> generatedKeys = new ArrayList<>();
+        private final Map<String, Object> generatedKeysByClientKey = new LinkedHashMap<>();
+        void record(String clientKey, Object key) {
+            if (key != null) generatedKeys.add(key);
+            if (clientKey != null) generatedKeysByClientKey.put(clientKey, key);
+        }
+    }
 }
