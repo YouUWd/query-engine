@@ -79,7 +79,7 @@ public final class MutationExecutor {
             dsl.insertInto(table).set(values).execute();
             return;
         }
-        dsl.insertInto(table).set(values).returning(field(primaryKey)).fetchOne(field(primaryKey));
+        dsl.insertInto(table).set(values).returning(DSL.field(name(targetTable, primaryKey.columnName()), Object.class)).fetchOne(DSL.field(name(targetTable, primaryKey.columnName()), Object.class));
     }
 
     private Object relationValue(SysModule module, List<MutationPlan.Assignment> root, Object rootKey, String mainField) {
@@ -104,8 +104,8 @@ public final class MutationExecutor {
         for (List<MutationPlan.Assignment> secondary : groups.values()) {
             String targetTable = tableOf(secondary);
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
-            Field<Object> targetJoin = field(name(targetTable, relation.joinField()), Object.class);
-            Field<Object> rootJoin = field(name(module.primaryTable(), relation.mainField()), Object.class);
+            Field<Object> targetJoin = DSL.field(name(targetTable, relation.joinField()), Object.class);
+            Field<Object> rootJoin = DSL.field(name(module.primaryTable(), relation.mainField()), Object.class);
             Select<Record1<Object>> matching = dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(condition(plan.where()));
             dsl.update(table(name(targetTable))).set(assignmentMap(secondary)).where(targetJoin.in(matching)).execute();
         }
