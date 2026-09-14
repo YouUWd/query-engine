@@ -23,17 +23,32 @@ public final class ModuleQueryCompiler {
         ModuleSqlAst ast = parser.parseSelect(sql);
         SysModule root = registry.module(ast.rootModuleToken());
         List<LogicalFieldRef> projections = new ArrayList<>();
+        List<ProjectionToken> tokens = new ArrayList<>();
+        for (String token : ast.projectionTokens()) tokens.add(projectionToken(token));
+
+        Set<String> explicitAliases = new HashSet<>();
+        for (ProjectionToken token : tokens) {
+            if (token.alias() != null && !explicitAliases.add(token.alias().toLowerCase(Locale.ROOT)))
+                throw new IllegalArgumentException("Duplicate projection alias: " + token.alias());
+        }
+
         List<String> aliases = new ArrayList<>();
-        for (String token : ast.projectionTokens()) {
-            ProjectionToken projection = projectionToken(token);
+        Set<String> usedAliases = new HashSet<>();
+        for (ProjectionToken projection : tokens) {
             if ("*".equals(projection.expression())) {
-                List<LogicalFieldRef> expanded = allVisible(root.id());
-                projections.addAll(expanded);
-                expanded.forEach(ref -> aliases.add(registry.field(ref.fieldId()).columnName()));
+                for (LogicalFieldRef ref : allVisible(root.id())) {
+                    projections.add(ref);
+                    aliases.add(uniqueDefaultAlias(registry.field(ref.fieldId()).columnName(), usedAliases, explicitAliases));
+                }
             } else {
                 LogicalFieldRef ref = resolve(root.id(), projection.expression());
                 projections.add(ref);
-                aliases.add(projection.alias() == null ? registry.field(ref.fieldId()).columnName() : projection.alias());
+                if (projection.alias() != null) {
+                    aliases.add(projection.alias());
+                    usedAliases.add(projection.alias().toLowerCase(Locale.ROOT));
+                } else {
+                    aliases.add(uniqueDefaultAlias(registry.field(ref.fieldId()).columnName(), usedAliases, explicitAliases));
+                }
             }
         }
 
@@ -50,6 +65,15 @@ public final class ModuleQueryCompiler {
             page = new PaginationPlan(offset / ast.limit() + 1, ast.limit(), offset);
         }
         return new QueryPlan(root.id(), projections, List.of(), flat, expr, new SortPlan(sorts), page, aliases);
+    }
+
+    private String uniqueDefaultAlias(String base, Set<String> used, Set<String> explicitAliases) {
+        String candidate = base;
+        int suffix = 2;
+        while (used.contains(candidate.toLowerCase(Locale.ROOT)) || explicitAliases.contains(candidate.toLowerCase(Locale.ROOT)))
+            candidate = base + "_" + suffix++;
+        used.add(candidate.toLowerCase(Locale.ROOT));
+        return candidate;
     }
 
     private FilterExpressionPlan compileFilter(long root, Expression e, List<FilterPlan> flat) {
@@ -173,7 +197,6 @@ public final class ModuleQueryCompiler {
         String x = value.trim();
         int as = x.toLowerCase(Locale.ROOT).lastIndexOf(" as ");
         if (as > 0) return new ProjectionToken(x.substring(0, as).trim(), cleanAlias(x.substring(as + 4)));
-        // JSqlParser can render an alias without AS as "expression alias".
         String[] parts = x.split("\\s+");
         if (parts.length == 2 && parts[1].matches("[A-Za-z_][A-Za-z0-9_]*"))
             return new ProjectionToken(parts[0], cleanAlias(parts[1]));
