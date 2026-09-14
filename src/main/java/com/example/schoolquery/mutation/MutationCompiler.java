@@ -26,10 +26,12 @@ public final class MutationCompiler {
 
     public MutationPlan compile(String sql) {
         try {
-            Statement s = CCJSqlParserUtil.parse(normalizeModuleSource(sql));
-            if (s instanceof Insert i) return compileInsert(i);
-            if (s instanceof Update u) return compileUpdate(u);
-            if (s instanceof Delete d) return compileDelete(d);
+            if (sql == null || sql.isBlank()) throw new IllegalArgumentException("Mutation SQL cannot be blank");
+            ModuleSource source = moduleSource(sql);
+            Statement s = CCJSqlParserUtil.parse(source.normalizedSql());
+            if (s instanceof Insert i) return compileInsert(i, source.module());
+            if (s instanceof Update u) return compileUpdate(u, source.module());
+            if (s instanceof Delete d) return compileDelete(d, source.module());
             throw new IllegalArgumentException("Only INSERT/UPDATE/DELETE are supported: " + s.getClass().getSimpleName());
         } catch (Exception e) {
             if (e instanceof IllegalArgumentException iae) throw iae;
@@ -37,28 +39,40 @@ public final class MutationCompiler {
         }
     }
 
-    private String normalizeModuleSource(String sql) {
-        if (sql == null || sql.isBlank()) throw new IllegalArgumentException("Mutation SQL cannot be blank");
+    private ModuleSource moduleSource(String sql) {
         Matcher matcher = MODULE_SOURCE.matcher(sql);
-        StringBuffer result = new StringBuffer(); boolean found = false;
+        SysModule explicit = null;
+        StringBuffer result = new StringBuffer();
         while (matcher.find()) {
-            found = true; String token = matcher.group(1);
+            if (explicit != null) throw new IllegalArgumentException("Only one module(...) source is supported in mutation SQL");
+            String token = matcher.group(1);
             if (token.startsWith("'") && token.endsWith("'")) token = token.substring(1, token.length() - 1).replace("''", "'");
-            SysModule module = registry.module(token);
-            if (module.isVirtual()) throw new IllegalArgumentException("Cannot mutate virtual module: " + module.id());
-            matcher.appendReplacement(result, Matcher.quoteReplacement("`" + module.primaryTable() + "`"));
+            explicit = registry.module(token);
+            if (explicit.isVirtual()) throw new IllegalArgumentException("Cannot mutate virtual module: " + explicit.id());
+            matcher.appendReplacement(result, Matcher.quoteReplacement("`" + explicit.primaryTable() + "`"));
         }
-        matcher.appendTail(result); return found ? result.toString() : sql;
+        matcher.appendTail(result);
+        return new ModuleSource(result.toString(), explicit);
     }
 
     private SysModule moduleForTable(String rawTable) {
         String table = rawTable == null ? "" : rawTable.replace("`", "");
-        for (SysModule module : registry.allModules()) if (!module.isVirtual() && module.primaryTable().equalsIgnoreCase(table)) return module;
-        throw new IllegalArgumentException("Unknown module physical table: " + rawTable);
+        List<SysModule> matches = registry.allModules().stream()
+                .filter(m -> !m.isVirtual() && m.primaryTable().equalsIgnoreCase(table)).toList();
+        if (matches.size() != 1) {
+            if (matches.isEmpty()) throw new IllegalArgumentException("Unknown module physical table: " + rawTable);
+            throw new IllegalArgumentException("Ambiguous physical table '" + rawTable + "'; use module(moduleIdOrCode)");
+        }
+        return matches.get(0);
     }
 
-    private MutationPlan compileInsert(Insert insert) {
-        SysModule module = moduleForTable(insert.getTable().getName());
+    private SysModule targetModule(SysModule explicit, String physicalTable) {
+        if (explicit != null) return explicit;
+        return moduleForTable(physicalTable);
+    }
+
+    private MutationPlan compileInsert(Insert insert, SysModule explicit) {
+        SysModule module = targetModule(explicit, insert.getTable().getName());
         if (insert.getColumns() == null || insert.getColumns().isEmpty()) throw new IllegalArgumentException("INSERT must specify columns");
         Select select = insert.getSelect(); if (select == null) throw new IllegalArgumentException("INSERT must specify VALUES");
         String body = select.toString().trim(); if (body.regionMatches(true, 0, "VALUES", 0, 6)) body = body.substring(6).trim();
@@ -66,18 +80,18 @@ public final class MutationCompiler {
         List<String> values = splitValues(body.substring(1, body.length() - 1));
         if (values.size() != insert.getColumns().size()) throw new IllegalArgumentException("INSERT column/value count mismatch");
         List<MutationPlan.Assignment> a = new ArrayList<>();
-        for (int i = 0; i < insert.getColumns().size(); i++) a.add(new MutationPlan.Assignment(resolve(module.id(), insert.getColumns().get(i).getColumnName()), literal(values.get(i))));
+        for (int i = 0; i < insert.getColumns().size(); i++) a.add(new MutationPlan.Assignment(resolveWritable(module.id(), insert.getColumns().get(i).getColumnName()), literal(values.get(i))));
         return new MutationPlan(MutationPlan.Operation.INSERT, module.id(), a, List.of(), null);
     }
 
-    private MutationPlan compileUpdate(Update update) {
-        SysModule module = moduleForTable(update.getTable().getName()); List<MutationPlan.Assignment> a = new ArrayList<>();
-        for (int i = 0; i < update.getColumns().size(); i++) a.add(new MutationPlan.Assignment(resolve(module.id(), update.getColumns().get(i).getColumnName()), literal(update.getExpressions().get(i).toString())));
+    private MutationPlan compileUpdate(Update update, SysModule explicit) {
+        SysModule module = targetModule(explicit, update.getTable().getName()); List<MutationPlan.Assignment> a = new ArrayList<>();
+        for (int i = 0; i < update.getColumns().size(); i++) a.add(new MutationPlan.Assignment(resolveWritable(module.id(), update.getColumns().get(i).getColumnName()), literal(update.getExpressions().get(i).toString())));
         return new MutationPlan(MutationPlan.Operation.UPDATE, module.id(), a, List.of(), where(module.id(), update.getWhere()));
     }
 
-    private MutationPlan compileDelete(Delete delete) {
-        SysModule module = moduleForTable(delete.getTable().getName());
+    private MutationPlan compileDelete(Delete delete, SysModule explicit) {
+        SysModule module = targetModule(explicit, delete.getTable().getName());
         return new MutationPlan(MutationPlan.Operation.DELETE, module.id(), List.of(), List.of(), where(module.id(), delete.getWhere()));
     }
 
@@ -86,18 +100,16 @@ public final class MutationCompiler {
     }
 
     private MutationPlan.Expression compileWhereExpression(long moduleId, Expression e) {
-        if (e instanceof AndExpression a)
-            return new MutationPlan.And(compileWhereExpression(moduleId, a.getLeftExpression()), compileWhereExpression(moduleId, a.getRightExpression()));
-        if (e instanceof OrExpression o)
-            return new MutationPlan.Or(compileWhereExpression(moduleId, o.getLeftExpression()), compileWhereExpression(moduleId, o.getRightExpression()));
+        if (e instanceof AndExpression a) return new MutationPlan.And(compileWhereExpression(moduleId, a.getLeftExpression()), compileWhereExpression(moduleId, a.getRightExpression()));
+        if (e instanceof OrExpression o) return new MutationPlan.Or(compileWhereExpression(moduleId, o.getLeftExpression()), compileWhereExpression(moduleId, o.getRightExpression()));
         return new MutationPlan.PredicateExpression(predicate(moduleId, e));
     }
 
     private MutationPlan.Predicate predicate(long moduleId, Expression e) {
-        if (e instanceof IsNullExpression x) return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), x.isNot() ? "IS_NOT_NULL" : "IS_NULL", null);
-        if (e instanceof Between x) return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), "BETWEEN", List.of(literal(x.getBetweenExpressionStart().toString()), literal(x.getBetweenExpressionEnd().toString())));
-        if (e instanceof InExpression x) { String text = x.getRightExpression() == null ? "" : x.getRightExpression().toString(); return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), x.isNot() ? "NOT_IN" : "IN", parseList(text)); }
-        if (e instanceof BinaryExpression x) return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), operator(x), literal(x.getRightExpression().toString()));
+        if (e instanceof IsNullExpression x) return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), x.isNot() ? "IS_NOT_NULL" : "IS_NULL", null);
+        if (e instanceof Between x) return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), "BETWEEN", List.of(literal(x.getBetweenExpressionStart().toString()), literal(x.getBetweenExpressionEnd().toString())));
+        if (e instanceof InExpression x) { String text = x.getRightExpression() == null ? "" : x.getRightExpression().toString(); return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), x.isNot() ? "NOT_IN" : "IN", parseList(text)); }
+        if (e instanceof BinaryExpression x) return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), operator(x), literal(x.getRightExpression().toString()));
         throw new IllegalArgumentException("Unsupported DML WHERE expression: " + e);
     }
 
@@ -112,19 +124,22 @@ public final class MutationCompiler {
         if (x.isEmpty()) return List.of(); return splitValues(x).stream().map(this::literal).toList();
     }
 
-    private LogicalFieldRef resolve(long moduleId, String raw) {
+    private LogicalFieldRef resolveWritable(long moduleId, String raw) {
         String x = raw.trim().replace("`", "");
-        if (x.matches("f\\d+")) return resolveId(moduleId, Long.parseLong(x.substring(1)));
-        if (x.matches("\\d+")) return resolveId(moduleId, Long.parseLong(x));
+        if (x.matches("f\\d+")) return resolveWritableId(moduleId, Long.parseLong(x.substring(1)));
+        if (x.matches("\\d+")) return resolveWritableId(moduleId, Long.parseLong(x));
         String column = x.contains(".") ? x.substring(x.lastIndexOf('.') + 1) : x; List<SysModuleField> m = new ArrayList<>();
         for (List<SysModuleField> fs : registry.fieldsGroupedByTable(moduleId).values()) for (SysModuleField f : fs) if (f.columnName().equals(column)) m.add(f);
         if (m.size() != 1) throw new IllegalArgumentException("Unknown or ambiguous field: " + raw);
-        SysModuleField f = m.get(0); return new LogicalFieldRef(f.moduleId(), f.id());
+        SysModuleField f = m.get(0);
+        if (!f.tableName().equalsIgnoreCase(registry.module(moduleId).primaryTable())) throw new IllegalArgumentException("Scalar DML field must belong to module primary table: " + raw);
+        return new LogicalFieldRef(f.moduleId(), f.id());
     }
 
-    private LogicalFieldRef resolveId(long moduleId, long fieldId) {
+    private LogicalFieldRef resolveWritableId(long moduleId, long fieldId) {
         SysModuleField f = registry.field(fieldId);
         if (!registry.ancestorChain(f.moduleId()).contains(moduleId)) throw new IllegalArgumentException("fieldId=" + fieldId + " is outside module " + moduleId);
+        if (!f.tableName().equalsIgnoreCase(registry.module(moduleId).primaryTable())) throw new IllegalArgumentException("Scalar DML field must belong to module primary table: fieldId=" + fieldId);
         return new LogicalFieldRef(f.moduleId(), f.id());
     }
 
@@ -139,4 +154,6 @@ public final class MutationCompiler {
         for (int i = 0; i < text.length(); i++) { char ch = text.charAt(i); if (ch == '\'' && (i + 1 >= text.length() || text.charAt(i + 1) != '\'')) quoted = !quoted; if (ch == ',' && !quoted) { r.add(c.toString().trim()); c.setLength(0); } else c.append(ch); }
         r.add(c.toString().trim()); return r;
     }
+
+    private record ModuleSource(String normalizedSql, SysModule module) {}
 }
