@@ -116,21 +116,32 @@ public final class MutationExecutor {
         Condition rootCondition = condition(plan.where());
         int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), rootCondition);
 
-        // Secondary 1:1 updates are constrained by a scalar subquery over the
-        // exact root row set. The subquery keeps both sides as database fields,
-        // avoiding Java-side key extraction and JDBC IN-list type inference.
-        // This also avoids relying on an UPDATE-target reference from a nested
-        // EXISTS, which behaves differently across SQL dialects.
+        // For each secondary 1:1 table, update rows whose FK belongs to the
+        // exact root row set selected by the Module SQL WHERE clause. Keep the
+        // root-key selection as a scalar subquery rather than fetching keys into
+        // Java. The physical relation is the only bridge between the logical
+        // root row set and the secondary table.
         for (List<MutationPlan.Assignment> secondary : groups.values()) {
             String targetTable = tableOf(secondary);
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
-            Field<Object> rootJoin = DSL.field(name(module.primaryTable(), relation.mainField()), Object.class);
-            Field<Object> targetJoin = DSL.field(name(targetTable, relation.joinField()), Object.class);
 
-            Select<?> matchingRootKeys = select(rootJoin)
-                    .from(table(name(module.primaryTable())))
+            Table<?> rootTable = table(name(module.primaryTable()));
+            Table<?> secondaryTable = table(name(targetTable));
+            Field<Object> rootJoin = DSL.field(
+                    name(module.primaryTable(), relation.mainField()), Object.class);
+            Field<Object> targetJoin = DSL.field(
+                    name(targetTable, relation.joinField()), Object.class);
+
+            // Build the root key subquery independently from the UPDATE target.
+            // This is deliberately an uncorrelated SELECT over the root table:
+            //   target.fk IN (SELECT root.pk_or_key FROM root WHERE <root WHERE>)
+            // It is portable across H2/MySQL/PostgreSQL and does not rely on
+            // UPDATE-target references inside EXISTS.
+            Select<?> matchingRootKeys = dsl.select(rootJoin)
+                    .from(rootTable)
                     .where(rootCondition);
-            dsl.update(table(name(targetTable)))
+
+            dsl.update(secondaryTable)
                     .set(assignmentMap(secondary, targetTable))
                     .where(targetJoin.in(matchingRootKeys))
                     .execute();
