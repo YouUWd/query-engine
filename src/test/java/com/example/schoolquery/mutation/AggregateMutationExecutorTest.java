@@ -99,8 +99,8 @@ class AggregateMutationExecutorTest {
 
         DSLContext dsl = dsl();
         assertEquals(3, executor().execute(dsl, mutation));
-        assertEquals("Alice-2", dsl.select(DSL.field("name")).from(DSL.table("student")).where(DSL.field("id").eq(1)).fetchOne());
-        assertEquals("Java-2", dsl.select(DSL.field("course_name")).from(DSL.table("student_course")).where(DSL.field("id").eq(10)).fetchOne());
+        assertEquals("Alice-2", dsl.select(DSL.field("name")).from(DSL.table("student")).where(DSL.field("id").eq(1)).fetchOne(DSL.field("name")));
+        assertEquals("Java-2", dsl.select(DSL.field("course_name")).from(DSL.table("student_course")).where(DSL.field("id").eq(10)).fetchOne(DSL.field("course_name")));
         assertEquals(2, dsl.fetchCount(DSL.table("course_item"), DSL.field("course_id").eq(10)));
         assertEquals(1, dsl.fetchCount(DSL.table("student_course"), DSL.field("id").eq(11)));
         assertEquals(1, dsl.fetchCount(DSL.table("course_item"), DSL.field("id").eq(102)));
@@ -116,29 +116,33 @@ class AggregateMutationExecutorTest {
                                 Map.of("f301", 100, "f303", "JDBC-2"), List.of(),
                                 AggregateMutation.SaveMode.FULL_SYNC, true)),
                         AggregateMutation.SaveMode.FULL_SYNC, true)),
-                AggregateMutation.SaveMode.FULL_SYNC, true);
+                AggregateMutation.SaveMode.FULL_SYNC, true));
 
         DSLContext dsl = dsl();
         executor().execute(dsl, mutation);
         assertEquals(1, dsl.fetchCount(DSL.table("student_course"), DSL.field("student_id").eq(1)));
         assertEquals(0, dsl.fetchCount(DSL.table("student_course"), DSL.field("id").eq(11)));
-        assertEquals("JDBC-2", dsl.select(DSL.field("item_name")).from(DSL.table("course_item")).where(DSL.field("id").eq(100)).fetchOne());
+        assertEquals("JDBC-2", dsl.select(DSL.field("item_name")).from(DSL.table("course_item")).where(DSL.field("id").eq(100)).fetchOne(DSL.field("item_name")));
         assertEquals(1, dsl.fetchCount(DSL.table("course_item"), DSL.field("course_id").eq(10)));
         assertEquals(0, dsl.fetchCount(DSL.table("course_item"), DSL.field("id").eq(101)));
         assertEquals(0, dsl.fetchCount(DSL.table("course_item"), DSL.field("id").eq(102)));
     }
 
     @Test
+    void fullSyncCanExplicitlyClearAnEmptyChildCollection() throws Exception {
+        DSLContext dsl = dsl();
+        AggregateMutation mutation = new AggregateMutation(AggregateMutation.Operation.UPDATE, 1,
+                Map.of("f101", 1), List.of(), AggregateMutation.SaveMode.FULL_SYNC, true, Set.of(2L));
+        assertEquals(3, executor().execute(dsl, mutation));
+        assertEquals(0, dsl.fetchCount(DSL.table("student_course"), DSL.field("student_id").eq(1)));
+        assertEquals(0, dsl.fetchCount(DSL.table("course_item"), DSL.field("course_id").in(10, 11)));
+    }
+
+    @Test
     void deleteCascadesBottomUp() throws Exception {
         AggregateMutation mutation = new AggregateMutation(AggregateMutation.Operation.DELETE, 1,
                 Map.of("f101", 1),
-                List.of(new AggregateMutation(AggregateMutation.Operation.DELETE, 2, Map.of("f201", 10),
-                                List.of(new AggregateMutation(AggregateMutation.Operation.DELETE, 3, Map.of("f301", 100), List.of(), AggregateMutation.SaveMode.PATCH, false)),
-                                AggregateMutation.SaveMode.PATCH, false),
-                        new AggregateMutation(AggregateMutation.Operation.DELETE, 2, Map.of("f201", 11),
-                                List.of(new AggregateMutation(AggregateMutation.Operation.DELETE, 3, Map.of("f301", 102), List.of(), AggregateMutation.SaveMode.PATCH, false)),
-                                AggregateMutation.SaveMode.PATCH, false)),
-                AggregateMutation.SaveMode.PATCH, false);
+                List.of(), AggregateMutation.SaveMode.PATCH, false);
 
         DSLContext dsl = dsl();
         assertEquals(6, executor().execute(dsl, mutation));
