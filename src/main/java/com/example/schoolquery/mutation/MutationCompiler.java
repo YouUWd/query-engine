@@ -81,18 +81,16 @@ public final class MutationCompiler {
         List<String> values = splitValues(body.substring(1, body.length() - 1));
         if (values.size() != insert.getColumns().size()) throw new IllegalArgumentException("INSERT column/value count mismatch");
         List<MutationPlan.Assignment> assignments = new ArrayList<>();
-        for (int i = 0; i < insert.getColumns().size(); i++) {
+        for (int i = 0; i < insert.getColumns().size(); i++)
             assignments.add(new MutationPlan.Assignment(resolveWritable(module.id(), insert.getColumns().get(i).getColumnName()), literal(values.get(i))));
-        }
         return new MutationPlan(MutationPlan.Operation.INSERT, module.id(), assignments, List.of(), null);
     }
 
     private MutationPlan compileUpdate(Update update, SysModule explicit) {
         SysModule module = targetModule(explicit, update.getTable().getName());
         List<MutationPlan.Assignment> assignments = new ArrayList<>();
-        for (int i = 0; i < update.getColumns().size(); i++) {
+        for (int i = 0; i < update.getColumns().size(); i++)
             assignments.add(new MutationPlan.Assignment(resolveWritable(module.id(), update.getColumns().get(i).getColumnName()), literal(update.getExpressions().get(i).toString())));
-        }
         return new MutationPlan(MutationPlan.Operation.UPDATE, module.id(), assignments, List.of(), where(module.id(), update.getWhere()));
     }
 
@@ -101,9 +99,7 @@ public final class MutationCompiler {
         return new MutationPlan(MutationPlan.Operation.DELETE, module.id(), List.of(), List.of(), where(module.id(), delete.getWhere()));
     }
 
-    private MutationPlan.Where where(long moduleId, Expression e) {
-        return e == null ? null : new MutationPlan.Where(compileWhereExpression(moduleId, e));
-    }
+    private MutationPlan.Where where(long moduleId, Expression e) { return e == null ? null : new MutationPlan.Where(compileWhereExpression(moduleId, e)); }
 
     private MutationPlan.Expression compileWhereExpression(long moduleId, Expression e) {
         if (e instanceof AndExpression a) return new MutationPlan.And(compileWhereExpression(moduleId, a.getLeftExpression()), compileWhereExpression(moduleId, a.getRightExpression()));
@@ -145,10 +141,20 @@ public final class MutationCompiler {
         String x = raw.trim().replace("`", "");
         if (x.matches("f\\d+")) return resolveWritableId(moduleId, Long.parseLong(x.substring(1)));
         if (x.matches("\\d+")) return resolveWritableId(moduleId, Long.parseLong(x));
-        String column = x.contains(".") ? x.substring(x.lastIndexOf('.') + 1) : x;
+        String qualifier = null;
+        String column = x;
+        int dot = x.lastIndexOf('.');
+        if (dot >= 0) {
+            qualifier = x.substring(0, dot);
+            column = x.substring(dot + 1);
+        }
         List<SysModuleField> matches = new ArrayList<>();
         for (List<SysModuleField> fs : registry.fieldsGroupedByTable(moduleId).values()) {
-            for (SysModuleField f : fs) if (f.columnName().equalsIgnoreCase(column)) matches.add(f);
+            for (SysModuleField f : fs) {
+                if (!f.columnName().equalsIgnoreCase(column)) continue;
+                if (qualifier != null && !f.tableName().equalsIgnoreCase(qualifier)) continue;
+                matches.add(f);
+            }
         }
         if (matches.size() != 1) throw new IllegalArgumentException("Unknown or ambiguous field: " + raw);
         SysModuleField f = matches.get(0);
@@ -173,17 +179,13 @@ public final class MutationCompiler {
     }
 
     private List<String> splitValues(String text) {
-        List<String> r = new ArrayList<>();
-        StringBuilder c = new StringBuilder();
-        boolean quoted = false;
+        List<String> r = new ArrayList<>(); StringBuilder c = new StringBuilder(); boolean quoted = false;
         for (int i = 0; i < text.length(); i++) {
             char ch = text.charAt(i);
             if (ch == '\'' && (i + 1 >= text.length() || text.charAt(i + 1) != '\'')) quoted = !quoted;
-            if (ch == ',' && !quoted) { r.add(c.toString().trim()); c.setLength(0); }
-            else c.append(ch);
+            if (ch == ',' && !quoted) { r.add(c.toString().trim()); c.setLength(0); } else c.append(ch);
         }
-        r.add(c.toString().trim());
-        return r;
+        r.add(c.toString().trim()); return r;
     }
 
     private record ModuleSource(String normalizedSql, SysModule module) {}
