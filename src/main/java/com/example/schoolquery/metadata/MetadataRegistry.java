@@ -1,8 +1,8 @@
 package com.example.schoolquery.metadata;
 
-import com.example.schoolquery.model.SysModule;
-import com.example.schoolquery.model.SysModuleField;
-import com.example.schoolquery.model.SysTableRelation;
+import com.example.schoolquery.metadata.SysModule;
+import com.example.schoolquery.metadata.SysModuleField;
+import com.example.schoolquery.metadata.SysTableRelation;
 
 import java.util.*;
 import java.util.stream.Collectors;

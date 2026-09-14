@@ -1,4 +1,5 @@
 package com.example.schoolquery.service;
+import com.example.schoolquery.query.resolver.*;
 
 import com.example.schoolquery.TestDatabases;
 import com.example.schoolquery.metadata.MetadataLoader;
@@ -6,8 +7,8 @@ import com.example.schoolquery.metadata.MetadataRegistry;
 import com.example.schoolquery.permission.PermissionContext;
 import com.example.schoolquery.permission.PermissionRegistry;
 import com.example.schoolquery.permission.SysDataScopeRule;
-import com.example.schoolquery.relation.RelationResolver;
-import com.example.schoolquery.sql.FlatGroupSqlBuilder;
+import com.example.schoolquery.query.resolver.RelationResolver;
+import com.example.schoolquery.query.renderer.FlatGroupSqlBuilder;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;

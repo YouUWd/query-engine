@@ -1,10 +1,12 @@
 package com.example.schoolquery.service;
+import com.example.schoolquery.result.*;
+
 
 import com.example.schoolquery.TestDatabases;
 import com.example.schoolquery.metadata.MetadataLoader;
 import com.example.schoolquery.metadata.MetadataRegistry;
-import com.example.schoolquery.query.*;
-import com.example.schoolquery.relation.RelationResolver;
+import com.example.schoolquery.query.model.*;
+import com.example.schoolquery.query.resolver.RelationResolver;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;

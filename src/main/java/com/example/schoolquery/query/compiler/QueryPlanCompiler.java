@@ -1,0 +1,107 @@
+
+package com.example.schoolquery.query.compiler;
+import com.example.schoolquery.query.model.*;
+import com.example.schoolquery.query.resolver.*;
+import com.example.schoolquery.query.renderer.*;
+import com.example.schoolquery.result.*;
+import com.example.schoolquery.sql.parser.*;
+import com.example.schoolquery.query.compiler.*;
+import com.example.schoolquery.query.executor.*;
+import com.example.schoolquery.mutation.model.*;
+import com.example.schoolquery.mutation.executor.*;
+import com.example.schoolquery.mutation.compiler.*;
+
+
+import com.example.schoolquery.metadata.MetadataRegistry;
+import com.example.schoolquery.metadata.RelationType;
+import com.example.schoolquery.metadata.SysModuleField;
+import com.example.schoolquery.metadata.SysTableRelation;
+import com.example.schoolquery.query.resolver.FlatGroup;
+import com.example.schoolquery.query.resolver.NestedGroup;
+import com.example.schoolquery.query.resolver.QueryTreeBuilder;
+import com.example.schoolquery.query.resolver.RelationResolver;
+
+import java.util.*;
+
+/**
+ * Compiles the existing module query tree into an immutable semantic QueryPlan.
+ *
+ * This is intentionally an incremental compiler: QueryTreeBuilder remains the
+ * compatibility layer for the current implementation, while downstream code
+ * can start depending on QueryPlan instead of rediscovering module semantics.
+ */
+public final class QueryPlanCompiler {
+    private final MetadataRegistry registry;
+    private final QueryTreeBuilder treeBuilder;
+
+    public QueryPlanCompiler(MetadataRegistry registry, RelationResolver resolver) {
+        this.registry = Objects.requireNonNull(registry, "registry");
+        this.treeBuilder = new QueryTreeBuilder(registry, Objects.requireNonNull(resolver, "resolver"));
+    }
+
+    /** Compile a query with an explicit root module. */
+    public QueryPlan compile(long rootModuleId, Collection<Long> fieldIds) {
+        Set<Long> ids = normalizeFieldIds(fieldIds);
+        List<SysModuleField> fields = ids.stream().map(registry::field).toList();
+        Set<Long> touchedModules = new LinkedHashSet<>();
+        List<LogicalFieldRef> projections = new ArrayList<>();
+        for (SysModuleField field : fields) {
+            touchedModules.add(field.moduleId());
+            projections.add(new LogicalFieldRef(field.moduleId(), field.id()));
+        }
+
+        FlatGroup tree = treeBuilder.buildFromRoot(rootModuleId, touchedModules);
+        return new QueryPlan(rootModuleId, projections, collectRelations(tree), List.of(), null, null);
+    }
+
+    /** Compile a query and infer its root from the requested fields. */
+    public QueryPlan compile(Collection<Long> fieldIds) {
+        Set<Long> ids = normalizeFieldIds(fieldIds);
+        List<SysModuleField> fields = ids.stream().map(registry::field).toList();
+        Set<Long> touchedModules = new LinkedHashSet<>();
+        List<LogicalFieldRef> projections = new ArrayList<>();
+        for (SysModuleField field : fields) {
+            touchedModules.add(field.moduleId());
+            projections.add(new LogicalFieldRef(field.moduleId(), field.id()));
+        }
+
+        FlatGroup tree = treeBuilder.buildAutoRoot(touchedModules);
+        return new QueryPlan(tree.mergedModuleIds().get(0), projections, collectRelations(tree), List.of(), null, null);
+    }
+
+    private List<RelationPlan> collectRelations(FlatGroup group) {
+        List<RelationPlan> result = new ArrayList<>();
+        collectRelations(group, result);
+        return List.copyOf(result);
+    }
+
+    private void collectRelations(FlatGroup group, List<RelationPlan> result) {
+        for (NestedGroup nested : group.nestedChildren()) {
+            SysTableRelation relation = nested.relation();
+            if (relation != null) {
+                result.add(new RelationPlan(
+                        group.mergedModuleIds().get(0),
+                        nested.childModuleId(),
+                        toPlanType(relation),
+                        relation.mainTable(),
+                        relation.mainField(),
+                        relation.joinTable(),
+                        relation.joinField()));
+            }
+            collectRelations(nested.group(), result);
+        }
+    }
+
+    private RelationPlan.RelationType toPlanType(SysTableRelation relation) {
+        return relation.type() == RelationType.ONE_TO_ONE
+                ? RelationPlan.RelationType.ONE_TO_ONE
+                : RelationPlan.RelationType.ONE_TO_MANY;
+    }
+
+    private Set<Long> normalizeFieldIds(Collection<Long> fieldIds) {
+        if (fieldIds == null || fieldIds.isEmpty()) {
+            throw new IllegalArgumentException("fieldIds must not be empty");
+        }
+        return new LinkedHashSet<>(fieldIds);
+    }
+}
