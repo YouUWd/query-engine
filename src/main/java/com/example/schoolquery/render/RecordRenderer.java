@@ -66,11 +66,11 @@ public class RecordRenderer {
         Map<String, Object> tableBuckets = new LinkedHashMap<>();
         for (long moduleId : group.mergedModuleIds()) {
             for (SysModuleField f : requestedByModule.getOrDefault(moduleId, List.of())) {
-                Object value = record.get(FlatGroupSqlBuilder.fieldAlias(f.id()));
                 Map<String, Object> bucket = (Map<String, Object>) tableBuckets
                         .computeIfAbsent(f.tableName(), t -> new LinkedHashMap<String, Object>());
                 Deque<String> aliases = aliasesByField.get(new LogicalFieldRef(f.moduleId(), f.id()));
-                String alias = aliases == null || aliases.isEmpty() ? f.columnName() : aliases.removeFirst();
+                String alias = aliases == null || aliases.isEmpty() ? FlatGroupSqlBuilder.fieldAlias(f.id()) : aliases.removeFirst();
+                Object value = record.get(alias);
                 bucket.put(alias, value);
             }
         }
