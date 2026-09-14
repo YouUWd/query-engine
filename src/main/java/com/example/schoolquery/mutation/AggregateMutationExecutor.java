@@ -27,11 +27,26 @@ public final class AggregateMutationExecutor {
     private int apply(DSLContext dsl, AggregateMutation m, SysModule parent, Object parentKey) {
         SysModule module = registry.module(m.moduleId());
         if (module.isVirtual()) throw new IllegalArgumentException("Cannot mutate virtual module: " + module.id());
+        validateFullSyncScope(m, module);
         return switch (m.operation()) {
             case INSERT -> insert(dsl, m, module, parent, parentKey);
             case UPDATE -> update(dsl, m, module, parent, parentKey);
             case DELETE -> delete(dsl, m, module, parent, parentKey);
         };
+    }
+
+    private void validateFullSyncScope(AggregateMutation m, SysModule module) {
+        if (m.saveMode() != AggregateMutation.SaveMode.FULL_SYNC || !m.orphanRemoval()) return;
+        Set<Long> declared = m.fullSyncChildModules();
+        for (long childModuleId : declared) {
+            SysModule child = registry.module(childModuleId);
+            if (!registry.children(module.id()).stream().anyMatch(x -> x.id() == child.id()))
+                throw new IllegalArgumentException("FULL_SYNC child module " + childModuleId + " is not a direct child of module " + module.id());
+        }
+        for (AggregateMutation child : m.children()) {
+            if (child.moduleId() == module.id())
+                throw new IllegalArgumentException("Aggregate mutation cannot contain itself as a child: " + module.id());
+        }
     }
 
     private int insert(DSLContext dsl, AggregateMutation m, SysModule module, SysModule parent, Object parentKey) {
@@ -60,7 +75,7 @@ public final class AggregateMutationExecutor {
         Table<?> table = table(name(module.primaryTable()));
         int count = map.isEmpty() ? 0 : dsl.update(table).set(map).where(field(pk).eq(key)).execute();
         for (AggregateMutation child : m.children()) count += apply(dsl, child, module, key);
-        if (m.saveMode() == AggregateMutation.SaveMode.FULL_SYNC && m.orphanRemoval()) count += removeOrphans(dsl, module, key, m.children());
+        if (m.saveMode() == AggregateMutation.SaveMode.FULL_SYNC && m.orphanRemoval()) count += removeOrphans(dsl, module, key, m);
         return count;
     }
 
@@ -85,12 +100,17 @@ public final class AggregateMutationExecutor {
         values.putIfAbsent(findColumn(child, rel.joinField()), parentKey);
     }
 
-    private int removeOrphans(DSLContext dsl, SysModule parent, Object parentKey, List<AggregateMutation> children) {
+    private int removeOrphans(DSLContext dsl, SysModule parent, Object parentKey, AggregateMutation m) {
         Map<Long, List<AggregateMutation>> byModule = new LinkedHashMap<>();
-        for (AggregateMutation child : children) byModule.computeIfAbsent(child.moduleId(), ignored -> new ArrayList<>()).add(child);
+        for (AggregateMutation child : m.children()) byModule.computeIfAbsent(child.moduleId(), ignored -> new ArrayList<>()).add(child);
+
+        Set<Long> scopes = m.fullSyncChildModules().isEmpty()
+                ? byModule.keySet()
+                : m.fullSyncChildModules();
         int count = 0;
-        for (List<AggregateMutation> mutations : byModule.values()) {
-            SysModule child = registry.module(mutations.get(0).moduleId());
+        for (long childModuleId : scopes) {
+            List<AggregateMutation> mutations = byModule.getOrDefault(childModuleId, List.of());
+            SysModule child = registry.module(childModuleId);
             if (child.primaryTable().equals(parent.primaryTable())) continue;
             SysTableRelation rel = relations.parentChildRelation(parent, child);
             if (rel == null) throw new IllegalArgumentException("No physical parent-child relation for modules " + parent.id() + " -> " + child.id());
