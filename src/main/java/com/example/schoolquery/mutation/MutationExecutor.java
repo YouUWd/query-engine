@@ -34,7 +34,7 @@ public final class MutationExecutor {
     private MutationExecutionResult insert(DSLContext dsl, MutationPlan plan) {
         Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
         SysModule module = registry.module(plan.rootModuleId());
-        if (groups.size() > 1 || (groups.size() == 1 && !groups.containsKey(key(module.primaryTable()))) ) {
+        if (groups.size() > 1 || (groups.size() == 1 && !groups.containsKey(key(module.primaryTable())))) {
             throw new IllegalArgumentException("Scalar cross-table INSERT is not supported yet; use aggregate mutation for multi-table INSERT");
         }
         Table<?> table = table(name(module.primaryTable()));
@@ -51,34 +51,32 @@ public final class MutationExecutor {
         SysModule module = registry.module(plan.rootModuleId());
         Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
         if (groups.isEmpty()) throw new IllegalArgumentException("UPDATE has no assignments");
-
-        int affected = 0;
         List<MutationPlan.Assignment> root = groups.remove(key(module.primaryTable()));
-        if (root != null) affected += updateTable(dsl, module.primaryTable(), root, plan.where());
+        if (!groups.isEmpty() && whereTouchesNonPrimaryTable(plan.where(), module)) {
+            throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
+        }
+
+        int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), condition(plan.where()));
+        if (root != null && !root.isEmpty()) updateTable(dsl, module.primaryTable(), root, plan.where());
 
         for (List<MutationPlan.Assignment> secondary : groups.values()) {
             String targetTable = tableOf(secondary);
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
-            if (whereTouchesNonPrimaryTable(plan.where(), module)) {
-                throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
-            }
             Field<Object> targetJoin = field(name(targetTable, relation.joinField()), Object.class);
             Field<Object> rootJoin = field(name(module.primaryTable(), relation.mainField()), Object.class);
             Select<?> matching = dsl.select(rootJoin)
                     .from(table(name(module.primaryTable())))
                     .where(condition(plan.where()));
-            affected += dsl.update(table(name(targetTable)))
+            dsl.update(table(name(targetTable)))
                     .set(assignmentMap(secondary))
                     .where(targetJoin.in(matching))
                     .execute();
         }
-        return affected;
+        return logicalRows;
     }
 
     private int updateTable(DSLContext dsl, String targetTable, List<MutationPlan.Assignment> assignments, MutationPlan.Where where) {
-        return dsl.update(table(name(targetTable)))
-                .set(assignmentMap(assignments))
-                .where(condition(where)).execute();
+        return dsl.update(table(name(targetTable))).set(assignmentMap(assignments)).where(condition(where)).execute();
     }
 
     private int delete(DSLContext dsl, MutationPlan plan) {
@@ -91,24 +89,22 @@ public final class MutationExecutor {
 
     private SysTableRelation oneToOneDirectRelation(SysModule module, String targetTable) {
         SysTableRelation relation = relations.relationOfModule(module.id(), targetTable);
-        if (relation.type() != com.example.schoolquery.model.RelationType.ONE_TO_ONE) {
+        if (relation.type() != com.example.schoolquery.model.RelationType.ONE_TO_ONE)
             throw new IllegalArgumentException("Scalar Module SQL cannot mutate 1:N table " + targetTable + "; use aggregate mutation");
-        }
         return relation;
     }
 
     private boolean hasSecondaryTables(SysModule module) {
-        for (List<SysModuleField> fs : registry.fieldsGroupedByTable(module.id()).values()) {
+        for (List<SysModuleField> fs : registry.fieldsGroupedByTable(module.id()).values())
             for (SysModuleField f : fs) if (!f.tableName().equalsIgnoreCase(module.primaryTable())) return true;
-        }
         return false;
     }
 
     private Map<String, List<MutationPlan.Assignment>> assignmentsByTable(MutationPlan plan) {
         Map<String, List<MutationPlan.Assignment>> result = new LinkedHashMap<>();
         for (MutationPlan.Assignment a : plan.assignments()) {
-            SysModuleField field = registry.field(a.field().fieldId());
-            result.computeIfAbsent(key(field.tableName()), ignored -> new ArrayList<>()).add(a);
+            SysModuleField f = registry.field(a.field().fieldId());
+            result.computeIfAbsent(key(f.tableName()), ignored -> new ArrayList<>()).add(a);
         }
         return result;
     }
@@ -120,8 +116,7 @@ public final class MutationExecutor {
 
     private boolean whereTouchesNonPrimaryTable(MutationPlan.Expression expression, SysModule module) {
         if (expression instanceof MutationPlan.PredicateExpression p) {
-            SysModuleField f = registry.field(p.predicate().field().fieldId());
-            return !f.tableName().equalsIgnoreCase(module.primaryTable());
+            return !registry.field(p.predicate().field().fieldId()).tableName().equalsIgnoreCase(module.primaryTable());
         }
         if (expression instanceof MutationPlan.And a) return whereTouchesNonPrimaryTable(a.left(), module) || whereTouchesNonPrimaryTable(a.right(), module);
         if (expression instanceof MutationPlan.Or o) return whereTouchesNonPrimaryTable(o.left(), module) || whereTouchesNonPrimaryTable(o.right(), module);
