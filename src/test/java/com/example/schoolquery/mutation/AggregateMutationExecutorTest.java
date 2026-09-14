@@ -88,9 +88,9 @@ class AggregateMutationExecutorTest {
         int affected = new AggregateMutationExecutor(registry, new RelationResolver(registry)).execute(dsl, mutation);
 
         assertEquals(4, affected);
-        assertEquals("Alice Updated", dsl.fetchValue(DSL.field("name"), DSL.table("student"), DSL.field("id").eq(1)));
-        assertEquals("Advanced Math", dsl.fetchValue(DSL.field("course_name"), DSL.table("student_course"), DSL.field("id").eq(10)));
-        assertEquals("Advanced Java", dsl.fetchValue(DSL.field("course_name"), DSL.table("student_course"), DSL.field("id").eq(11)));
+        assertEquals("Alice Updated", dsl.select(DSL.field("name")).from(DSL.table("student")).where(DSL.field("id").eq(1)).fetchOne(DSL.field("name")));
+        assertEquals("Advanced Math", dsl.select(DSL.field("course_name")).from(DSL.table("student_course")).where(DSL.field("id").eq(10)).fetchOne(DSL.field("course_name")));
+        assertEquals("Advanced Java", dsl.select(DSL.field("course_name")).from(DSL.table("student_course")).where(DSL.field("id").eq(11)).fetchOne(DSL.field("course_name")));
         assertEquals(0, dsl.fetchCount(DSL.table("student_course").where(DSL.field("id").eq(12))));
     }
 
