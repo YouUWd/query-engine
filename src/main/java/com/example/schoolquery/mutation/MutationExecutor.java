@@ -54,15 +54,18 @@ public final class MutationExecutor {
             List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
             if(matching.isEmpty())continue;
 
-            // The metadata layer intentionally does not carry JDBC types. Infer the
-            // relation-key type from the captured values so jOOQ renders a typed bind
-            // value instead of an Object/OTHER bind (notably important for H2).
+            // Metadata does not carry JDBC types, so derive the relation key type from
+            // the captured root values. Build typed equality terms rather than an
+            // Object/OTHER IN-list, which is not portable across JDBC drivers.
             Class<?> keyType=commonValueType(matching);
             Field<?> targetJoin=DSL.field(name(targetTable,relation.joinField()),keyType);
-            Map<Field<Object>,Object> values=assignmentMap(secondary,targetTable);
-            @SuppressWarnings({"rawtypes","unchecked"})
-            Condition relationCondition=((Field)targetJoin).in(matching);
-            dsl.update(table(name(targetTable))).set(values).where(relationCondition).execute();
+            Condition relationCondition=null;
+            for(Object value:matching){
+                @SuppressWarnings({"rawtypes","unchecked"}) Condition term=((Field)targetJoin).eq(value);
+                relationCondition=relationCondition==null?term:relationCondition.or(term);
+            }
+            if(relationCondition==null)continue;
+            dsl.update(table(name(targetTable))).set(typedAssignmentMap(secondary,targetTable)).where(relationCondition).execute();
         }
         return logicalRows;
     }
@@ -76,6 +79,7 @@ public final class MutationExecutor {
     private boolean whereTouchesNonPrimaryTable(MutationPlan.Where where,SysModule module){if(where==null||where.expression()==null)return false;return whereTouchesNonPrimaryTable(where.expression(),module);}
     private boolean whereTouchesNonPrimaryTable(MutationPlan.Expression expression,SysModule module){if(expression instanceof MutationPlan.PredicateExpression p)return !registry.field(p.predicate().field().fieldId()).tableName().equalsIgnoreCase(module.primaryTable());if(expression instanceof MutationPlan.And a)return whereTouchesNonPrimaryTable(a.left(),module)||whereTouchesNonPrimaryTable(a.right(),module);if(expression instanceof MutationPlan.Or o)return whereTouchesNonPrimaryTable(o.left(),module)||whereTouchesNonPrimaryTable(o.right(),module);return false;}
     private Map<Field<Object>,Object> assignmentMap(List<MutationPlan.Assignment> assignments,String targetTable){Map<Field<Object>,Object> values=new LinkedHashMap<>();for(MutationPlan.Assignment a:assignments){SysModuleField meta=registry.field(a.field().fieldId());values.put(DSL.field(name(targetTable,meta.columnName()),Object.class),a.value());}return values;}
+    private Map<Field<Object>,Object> typedAssignmentMap(List<MutationPlan.Assignment> assignments,String targetTable){Map<Field<Object>,Object> values=new LinkedHashMap<>();for(MutationPlan.Assignment a:assignments){SysModuleField meta=registry.field(a.field().fieldId());Object value=a.value();Class<?> type=value==null?Object.class:value.getClass();@SuppressWarnings("unchecked") Field<Object> target=DSL.field(name(targetTable,meta.columnName()),(Class<Object>)type);values.put(target,value);}return values;}
     private String tableOf(List<MutationPlan.Assignment> assignments){if(assignments.isEmpty())throw new IllegalArgumentException("Mutation assignment group cannot be empty");return registry.field(assignments.get(0).field().fieldId()).tableName();}
     private String key(String table){return table.toLowerCase(Locale.ROOT);}
     private SysModuleField findField(SysModule module,String table,String column){for(List<SysModuleField> fs:registry.fieldsGroupedByTable(module.id()).values())for(SysModuleField f:fs)if(f.tableName().equalsIgnoreCase(table)&&f.columnName().equalsIgnoreCase(column))return f;throw new IllegalArgumentException("Relation column "+table+"."+column+" is not configured in module "+module.id());}
