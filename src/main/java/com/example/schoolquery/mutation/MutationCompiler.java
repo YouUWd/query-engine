@@ -18,7 +18,7 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Compiles standard INSERT/UPDATE/DELETE syntax into a physical-independent plan. */
+/** Compiles Module SQL mutations into a physical-independent logical plan. */
 public final class MutationCompiler {
     private static final Pattern MODULE_SOURCE = Pattern.compile("(?i)\\bmodule\\s*\\(\\s*('(?:''|[^'])*'|\\d+)\\s*\\)");
     private final MetadataRegistry registry;
@@ -67,27 +67,33 @@ public final class MutationCompiler {
     }
 
     private SysModule targetModule(SysModule explicit, String physicalTable) {
-        if (explicit != null) return explicit;
-        return moduleForTable(physicalTable);
+        return explicit != null ? explicit : moduleForTable(physicalTable);
     }
 
     private MutationPlan compileInsert(Insert insert, SysModule explicit) {
         SysModule module = targetModule(explicit, insert.getTable().getName());
         if (insert.getColumns() == null || insert.getColumns().isEmpty()) throw new IllegalArgumentException("INSERT must specify columns");
-        Select select = insert.getSelect(); if (select == null) throw new IllegalArgumentException("INSERT must specify VALUES");
-        String body = select.toString().trim(); if (body.regionMatches(true, 0, "VALUES", 0, 6)) body = body.substring(6).trim();
+        Select select = insert.getSelect();
+        if (select == null) throw new IllegalArgumentException("INSERT must specify VALUES");
+        String body = select.toString().trim();
+        if (body.regionMatches(true, 0, "VALUES", 0, 6)) body = body.substring(6).trim();
         if (!body.startsWith("(") || !body.endsWith(")")) throw new IllegalArgumentException("Only a single-row VALUES INSERT is supported");
         List<String> values = splitValues(body.substring(1, body.length() - 1));
         if (values.size() != insert.getColumns().size()) throw new IllegalArgumentException("INSERT column/value count mismatch");
-        List<MutationPlan.Assignment> a = new ArrayList<>();
-        for (int i = 0; i < insert.getColumns().size(); i++) a.add(new MutationPlan.Assignment(resolveWritable(module.id(), insert.getColumns().get(i).getColumnName()), literal(values.get(i))));
-        return new MutationPlan(MutationPlan.Operation.INSERT, module.id(), a, List.of(), null);
+        List<MutationPlan.Assignment> assignments = new ArrayList<>();
+        for (int i = 0; i < insert.getColumns().size(); i++) {
+            assignments.add(new MutationPlan.Assignment(resolveWritable(module.id(), insert.getColumns().get(i).getColumnName()), literal(values.get(i))));
+        }
+        return new MutationPlan(MutationPlan.Operation.INSERT, module.id(), assignments, List.of(), null);
     }
 
     private MutationPlan compileUpdate(Update update, SysModule explicit) {
-        SysModule module = targetModule(explicit, update.getTable().getName()); List<MutationPlan.Assignment> a = new ArrayList<>();
-        for (int i = 0; i < update.getColumns().size(); i++) a.add(new MutationPlan.Assignment(resolveWritable(module.id(), update.getColumns().get(i).getColumnName()), literal(update.getExpressions().get(i).toString())));
-        return new MutationPlan(MutationPlan.Operation.UPDATE, module.id(), a, List.of(), where(module.id(), update.getWhere()));
+        SysModule module = targetModule(explicit, update.getTable().getName());
+        List<MutationPlan.Assignment> assignments = new ArrayList<>();
+        for (int i = 0; i < update.getColumns().size(); i++) {
+            assignments.add(new MutationPlan.Assignment(resolveWritable(module.id(), update.getColumns().get(i).getColumnName()), literal(update.getExpressions().get(i).toString())));
+        }
+        return new MutationPlan(MutationPlan.Operation.UPDATE, module.id(), assignments, List.of(), where(module.id(), update.getWhere()));
     }
 
     private MutationPlan compileDelete(Delete delete, SysModule explicit) {
@@ -108,51 +114,76 @@ public final class MutationCompiler {
     private MutationPlan.Predicate predicate(long moduleId, Expression e) {
         if (e instanceof IsNullExpression x) return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), x.isNot() ? "IS_NOT_NULL" : "IS_NULL", null);
         if (e instanceof Between x) return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), "BETWEEN", List.of(literal(x.getBetweenExpressionStart().toString()), literal(x.getBetweenExpressionEnd().toString())));
-        if (e instanceof InExpression x) { String text = x.getRightExpression() == null ? "" : x.getRightExpression().toString(); return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), x.isNot() ? "NOT_IN" : "IN", parseList(text)); }
+        if (e instanceof InExpression x) {
+            String text = x.getRightExpression() == null ? "" : x.getRightExpression().toString();
+            return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), x.isNot() ? "NOT_IN" : "IN", parseList(text));
+        }
         if (e instanceof BinaryExpression x) return new MutationPlan.Predicate(resolveWritable(moduleId, x.getLeftExpression().toString()), operator(x), literal(x.getRightExpression().toString()));
         throw new IllegalArgumentException("Unsupported DML WHERE expression: " + e);
     }
 
     private String operator(BinaryExpression e) {
-        if (e instanceof EqualsTo) return "EQ"; if (e instanceof NotEqualsTo) return "NE"; if (e instanceof GreaterThan) return "GT";
-        if (e instanceof GreaterThanEquals) return "GE"; if (e instanceof MinorThan) return "LT"; if (e instanceof MinorThanEquals) return "LE";
-        if (e instanceof LikeExpression) return "LIKE"; throw new IllegalArgumentException("Unsupported DML operator: " + e);
+        if (e instanceof EqualsTo) return "EQ";
+        if (e instanceof NotEqualsTo) return "NE";
+        if (e instanceof GreaterThan) return "GT";
+        if (e instanceof GreaterThanEquals) return "GE";
+        if (e instanceof MinorThan) return "LT";
+        if (e instanceof MinorThanEquals) return "LE";
+        if (e instanceof LikeExpression) return "LIKE";
+        throw new IllegalArgumentException("Unsupported DML operator: " + e);
     }
 
     private List<Object> parseList(String text) {
-        String x = text.trim(); if (x.startsWith("(") && x.endsWith(")")) x = x.substring(1, x.length() - 1).trim();
-        if (x.isEmpty()) return List.of(); return splitValues(x).stream().map(this::literal).toList();
+        String x = text.trim();
+        if (x.startsWith("(") && x.endsWith(")")) x = x.substring(1, x.length() - 1).trim();
+        if (x.isEmpty()) return List.of();
+        return splitValues(x).stream().map(this::literal).toList();
     }
 
+    /** A Module SQL field may target any physical table owned by the logical module. */
     private LogicalFieldRef resolveWritable(long moduleId, String raw) {
         String x = raw.trim().replace("`", "");
         if (x.matches("f\\d+")) return resolveWritableId(moduleId, Long.parseLong(x.substring(1)));
         if (x.matches("\\d+")) return resolveWritableId(moduleId, Long.parseLong(x));
-        String column = x.contains(".") ? x.substring(x.lastIndexOf('.') + 1) : x; List<SysModuleField> m = new ArrayList<>();
-        for (List<SysModuleField> fs : registry.fieldsGroupedByTable(moduleId).values()) for (SysModuleField f : fs) if (f.columnName().equals(column)) m.add(f);
-        if (m.size() != 1) throw new IllegalArgumentException("Unknown or ambiguous field: " + raw);
-        SysModuleField f = m.get(0);
-        if (!f.tableName().equalsIgnoreCase(registry.module(moduleId).primaryTable())) throw new IllegalArgumentException("Scalar DML field must belong to module primary table: " + raw);
+        String column = x.contains(".") ? x.substring(x.lastIndexOf('.') + 1) : x;
+        List<SysModuleField> matches = new ArrayList<>();
+        for (List<SysModuleField> fs : registry.fieldsGroupedByTable(moduleId).values()) {
+            for (SysModuleField f : fs) if (f.columnName().equalsIgnoreCase(column)) matches.add(f);
+        }
+        if (matches.size() != 1) throw new IllegalArgumentException("Unknown or ambiguous field: " + raw);
+        SysModuleField f = matches.get(0);
         return new LogicalFieldRef(f.moduleId(), f.id());
     }
 
     private LogicalFieldRef resolveWritableId(long moduleId, long fieldId) {
         SysModuleField f = registry.field(fieldId);
         if (!registry.ancestorChain(f.moduleId()).contains(moduleId)) throw new IllegalArgumentException("fieldId=" + fieldId + " is outside module " + moduleId);
-        if (!f.tableName().equalsIgnoreCase(registry.module(moduleId).primaryTable())) throw new IllegalArgumentException("Scalar DML field must belong to module primary table: fieldId=" + fieldId);
         return new LogicalFieldRef(f.moduleId(), f.id());
     }
 
     private Object literal(String text) {
-        String x = text.trim(); if (x.startsWith("'") && x.endsWith("'")) return x.substring(1, x.length() - 1).replace("''", "'");
-        if (x.equalsIgnoreCase("null")) return null; if (x.equalsIgnoreCase("true")) return true; if (x.equalsIgnoreCase("false")) return false;
-        try { return Long.parseLong(x); } catch (NumberFormatException ignored) { } try { return Double.parseDouble(x); } catch (NumberFormatException ignored) { } return x;
+        String x = text.trim();
+        if (x.startsWith("'") && x.endsWith("'")) return x.substring(1, x.length() - 1).replace("''", "'");
+        if (x.equalsIgnoreCase("null")) return null;
+        if (x.equalsIgnoreCase("true")) return true;
+        if (x.equalsIgnoreCase("false")) return false;
+        try { return Long.parseLong(x); } catch (NumberFormatException ignored) { }
+        try { return Double.parseDouble(x); } catch (NumberFormatException ignored) { }
+        return x;
     }
 
     private List<String> splitValues(String text) {
-        List<String> r = new ArrayList<>(); StringBuilder c = new StringBuilder(); boolean quoted = false;
-        for (int i = 0; i < text.length(); i++) { char ch = text.charAt(i); if (ch == '\'' && (i + 1 >= text.length() || text.charAt(i + 1) != '\'')) quoted = !quoted; if (ch == ',' && !quoted) { r.add(c.toString().trim()); c.setLength(0); } else c.append(ch); }
-        r.add(c.toString().trim()); return r;
+        List<String> r = new ArrayList<>();
+        StringBuilder c = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch == '\'' && (i + 1 >= text.length() || text.charAt(i + 1) != '\'')) quoted = !quoted;
+            if (ch == ',' && !quoted) { r.add(c.toString().trim()); c.setLength(0); }
+            else c.append(ch);
+        }
+        r.add(c.toString().trim());
+        return r;
     }
 
     private record ModuleSource(String normalizedSql, SysModule module) {}
