@@ -63,7 +63,7 @@ public final class QueryPlanExecutor {
         }
 
         List<Map<String, Object>> rendered = rows.stream()
-                .map(r -> renderer.renderRecord(plan.rootModuleId(), resolvedTree, r, requested, aliases))
+                .map(r -> renderer.renderRecordWithAliases(plan.rootModuleId(), resolvedTree, r, requested, aliases))
                 .toList();
         return new ModuleQueryResult(metadata(plan), rendered);
     }
