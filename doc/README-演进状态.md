@@ -18,11 +18,13 @@
 - 同一 FlatGroup 中如果不同逻辑 Module 对同一物理表产生不同 JOIN 键，直接判定模块树对应的物理 JOIN 不自洽并失败，不再静默选择一个关系。
 - `FlatGroupSqlBuilder` 已切换为只消费 `FlatGroup.tableJoins()`；SQL renderer 不再通过 `tableA/tableB` 调用 `RelationResolver.relationOf(...)` 推断模块内部 JOIN。
 - 新增 `QueryPlanExecutor`：直接执行 `QueryPlan`，不再依赖 `PagedFieldDrivenQueryService` 的 LIMIT/OR 兼容限制。
-- `DefaultModuleSqlEngine`：公开 DQL 入口已经切换到 `ModuleSqlParser -> ModuleQueryCompiler -> QueryPlanExecutor`；标量 DML 使用独立 Mutation Pipeline。
+- `DefaultModuleSqlEngine`：公开 DQL 入口已经切换到 `ModuleSqlParser -> ModuleQueryCompiler -> QueryPlanExecutor`；标量 DML 使用独立 Mutation Pipeline，并提供结构化 Aggregate Mutation 入口。
 - `MutationCompiler`：标准 INSERT / UPDATE / DELETE -> `MutationPlan`，WHERE 保留 AND/OR 布尔结构。
 - `MutationExecutor`：基于 jOOQ 执行标量 DML，并按 Mutation WHERE 表达式递归生成 `Condition`。
-- `AggregateMutation`：独立于标准 SQL 的聚合保存模型，显式表达 PATCH / FULL_SYNC / orphanRemoval。
-- `AggregateMutationExecutor`：单数据源事务、父先子后 INSERT、子先父后 DELETE、FULL_SYNC orphan removal 骨架。
+- 标量 UPDATE 支持同一逻辑 Module 的直接 1:1 次表写入；次表更新使用根表关系列子查询，并在根表更新前执行，避免 JDBC 类型推断和根主键修改造成的关联键失效。
+- `AggregateMutation`：独立于标准 SQL 的聚合保存模型，显式表达 PATCH / FULL_SYNC / orphanRemoval，并支持 `clientKey` 作为临时节点与生成主键之间的关联元数据。
+- `AggregateMutationResult`：返回逻辑影响行数、生成主键列表以及 `generatedKeysByClientKey`，其中 `clientKey` 永不写入数据库。
+- `AggregateMutationExecutor`：单数据源事务、父先子后 INSERT、子先父后 DELETE、FULL_SYNC orphan removal。
 - 虚拟模块继续作为 QueryTree 的结构节点保留，不把其错误地当成物理表。
 - `PagedResult` / `HeaderNode` 标记 deprecated，作为兼容层保留。
 - Maven CI 验证工作流。
@@ -109,23 +111,57 @@ WHERE f201 = 'Java'
 
 ### 7. QueryTree / FlatGroup / jOOQ 是内部实现细节
 
-公开 API 不暴露 QueryTree、FlatGroup、ResolvedTableJoinPlan 等实现模型。调用方只面对 Module SQL 和标准结果：
+公开查询 API 不暴露 QueryTree、FlatGroup、ResolvedTableJoinPlan 等实现模型。调用方只面对 Module SQL 和标准结果：
 
 ```java
 ModuleQueryResult executeQuery(DSLContext dsl, String sql);
 List<ColumnMeta> getMetadata(String sql);
 ModuleUpdateResult executeUpdate(DSLContext dsl, String sql);
+AggregateMutationResult executeAggregate(DSLContext dsl, AggregateMutation mutation);
 ```
+
+其中标准 SQL 覆盖普通单行 INSERT / UPDATE / DELETE；涉及 1:N 层级写入、级联删除、FULL_SYNC、orphanRemoval 等生命周期语义时，使用结构化 `AggregateMutation`，避免把业务级级联语义伪装成普通 SQL。
+
+### 8. 标量 DML 的安全边界
+
+标量 DML 的语义边界是“单个逻辑 Module 的单行/集合修改”，不是任意物理表 SQL：
+
+- Module SQL 明确指定 ModuleId / ModuleCode，避免共享 primary table 时发生模块猜测。
+- 同一逻辑 Module 的直接 1:1 次表允许随根表一起 INSERT / UPDATE，并保持同一数据库事务。
+- 1:N 写入必须进入 Aggregate Mutation。
+- 标量跨物理表 DELETE 当前拒绝，使用 Aggregate Mutation 表达完整生命周期。
+- 标量次表 UPDATE 的 WHERE 必须只引用根 Module primary table 字段；需要按次表条件筛选并级联修改时使用 Aggregate Mutation。
+- 标量 affectedRows 表示逻辑根行数，不累加多个物理表的影响行数。
+
+### 9. Aggregate Mutation 的职责
+
+Aggregate Mutation 是模块树保存的结构化业务协议，而不是 QueryPlan 的另一个 SQL 变体：
+
+```text
+AggregateMutation
+    ↓
+模块节点 values
+    ↓
+父子 Module Tree
+    ↓
+INSERT / UPDATE / DELETE
+    ↓
+1:N FK 传播 / FULL_SYNC / orphanRemoval
+    ↓
+单事务提交
+```
+
+`PATCH` 表示只处理请求中出现的子节点；`FULL_SYNC + orphanRemoval` 时，由 `fullSyncChildModules` 明确声明哪些子集合是权威集合，因此可以区分“未提交该集合”和“明确提交空集合”。`clientKey` 仅用于客户端临时节点与数据库生成主键的回填关联，不参与持久化。
 
 ## 仍在演进
 
-1. **测试与 CI 稳定化**：每次语义调整后继续以 Maven CI 为最终验证；当前最新 DML Boolean Tree 修改已经提交并等待最新运行完成。
+1. **CI 稳定化**：继续以 Maven CI 为最终验证；当前标量 1:1 UPDATE 修复正在验证。
 2. **1:N 局部过滤**：`compileLocal(...)` 已能把过滤表达式投影到子树；复杂跨层 OR 仍需要继续明确其安全语义和结果集语义。
 3. **SELECT ***：当前方向是将 `SELECT *` 定义为“当前根模块子树内所有可见 FieldId 的投影展开”，而不是物理 `table.*`。
 4. **ProjectionPlan**：目前投影别名已经可以进入 QueryPlan、结果和 `ColumnMeta`；下一步应把“投影 occurrence”提升为独立模型，以支持更复杂的重复投影表达。这里的 occurrence 只解决 SQL SELECT 列表重复引用，不改变 FieldId 的唯一语义。
 5. **DQL 性能路径**：当前正确性实现仍使用 jOOQ MULTISET。后续在语义稳定后，再评估 Root Page -> Batch Child Load -> ResultAssembler，以解决大分页和高基数 1:N 场景。
 6. **标量 DML 完整性**：AND/OR、比较、IN/NOT IN、BETWEEN、NULL、LIKE 已进入当前语义模型；后续继续补齐批量 VALUES、表达式赋值、类型转换等边界。
-7. **Aggregate Mutation**：继续接入乐观锁、软删除以及 Association / Composition 等元数据语义。
+7. **Aggregate Mutation**：继续接入乐观锁、软删除以及 Association / Composition 等元数据语义；同时可以在稳定 DTO 边界后接入 HTTP/JSON 层。
 8. **E2E 覆盖**：扩展到根查询、1:1、1:N、同表多 Module、虚拟 Module、模块树决定的模块内多物理表 JOIN、后代 EXISTS、AND/OR、SELECT *、别名、LIMIT/OFFSET、上游权限裁剪、数据权限 Condition、标量 DML 和级联保存。
 
 ## 目标架构
@@ -157,7 +193,7 @@ Semantic Compiler
    |       +--> ResolvedTableJoinPlan
    |
    v
-QueryPlanExecutor / MutationExecutor
+QueryPlanExecutor / MutationExecutor / AggregateMutationExecutor
    |
    v
 jOOQ SQL Builder
@@ -166,12 +202,14 @@ jOOQ SQL Builder
 DB
    |
    v
-ModuleQueryResult / ModuleUpdateResult
+ModuleQueryResult / ModuleUpdateResult / AggregateMutationResult
 ```
 
 ## 当前里程碑
 
 **Module SQL 已经成为公开执行入口，语义层已经从“按物理表拼 SQL”进一步演进为“以 ModuleId 定位模块树，以 FieldId 标识逻辑字段，沿模块树确定关系上下文，先完成 Module/Field/Relation 解析，再渲染 SQL”。**
+
+同时，层级写入已经从普通 DML 中分离出来：普通 SQL 保持数据库式的 INSERT / UPDATE / DELETE 语义；模块树级联保存通过 Aggregate Mutation 明确表达，返回结果可以通过 `clientKey -> generatedKey` 完成前端临时节点回填。memcite
 
 当前最重要的架构边界：
 
