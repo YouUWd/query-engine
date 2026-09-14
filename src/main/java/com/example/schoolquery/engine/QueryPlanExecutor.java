@@ -50,7 +50,7 @@ public final class QueryPlanExecutor {
         Condition rootCondition = conditionCompiler.compile(dsl, plan.rootModuleId(), plan.filterExpression());
         Map<Long, Condition> localConditions = buildLocalConditions(dsl, plan.rootModuleId(), plan.filterExpression());
 
-        var select = sqlBuilder.build(dsl, resolvedTree, requested, rootCondition, null, Map.of(), localConditions);
+        var select = sqlBuilder.build(dsl, resolvedTree, requested, rootCondition, null, Map.of(), localConditions, aliases);
         List<SortField<?>> orderBy = buildOrderBy(plan, resolvedTree);
         Result<Record> rows;
         if (orderBy.isEmpty()) {
