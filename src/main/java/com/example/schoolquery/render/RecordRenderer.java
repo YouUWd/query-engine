@@ -36,7 +36,7 @@ public class RecordRenderer {
         Map<LogicalFieldRef, Deque<String>> occurrences = new LinkedHashMap<>();
         aliasesByField.forEach((ref, aliases) -> occurrences.put(ref, new ArrayDeque<>(aliases)));
         Map<String, Object> wrapped = new LinkedHashMap<>();
-        wrapped.put(String.valueOf(rootModuleId), renderGroupBodyByProjectionAliases(rootGroup, record, requestedByModule, occurrences));
+        wrapped.put(String.valueOf(rootModuleId), renderGroupBodyByProjectionAliases(rootGroup, record, requestedByModule, occurrences, true));
         return wrapped;
     }
 
@@ -57,33 +57,36 @@ public class RecordRenderer {
         }
         Map<LogicalFieldRef, Deque<String>> queues = new LinkedHashMap<>();
         occurrences.forEach((ref, aliases) -> queues.put(ref, new ArrayDeque<>(aliases)));
-        return renderGroupBodyByProjectionAliases(group, record, requestedByModule, queues);
+        return renderGroupBodyByProjectionAliases(group, record, requestedByModule, queues, false);
     }
 
     private Map<String, Object> renderGroupBodyByProjectionAliases(FlatGroup group, Record record,
                                                                      Map<Long, List<SysModuleField>> requestedByModule,
-                                                                     Map<LogicalFieldRef, Deque<String>> aliasesByField) {
+                                                                     Map<LogicalFieldRef, Deque<String>> aliasesByField,
+                                                                     boolean useProjectionAliases) {
         Map<String, Object> tableBuckets = new LinkedHashMap<>();
         for (long moduleId : group.mergedModuleIds()) {
             for (SysModuleField f : requestedByModule.getOrDefault(moduleId, List.of())) {
                 Map<String, Object> bucket = (Map<String, Object>) tableBuckets
                         .computeIfAbsent(f.tableName(), t -> new LinkedHashMap<String, Object>());
                 Deque<String> aliases = aliasesByField.get(new LogicalFieldRef(f.moduleId(), f.id()));
-                String alias = aliases == null || aliases.isEmpty() ? FlatGroupSqlBuilder.fieldAlias(f.id()) : aliases.removeFirst();
-                Object value = record.get(alias);
-                bucket.put(alias, value);
+                String configuredAlias = aliases == null || aliases.isEmpty() ? f.columnName() : aliases.removeFirst();
+                String recordAlias = useProjectionAliases ? configuredAlias : FlatGroupSqlBuilder.fieldAlias(f.id());
+                String outputAlias = useProjectionAliases ? configuredAlias : configuredAlias;
+                Object value = record.get(recordAlias);
+                bucket.put(outputAlias, value);
             }
         }
         Map<String, Object> body = new LinkedHashMap<>(tableBuckets);
         for (NestedGroup nested : group.nestedChildren()) {
             if (nested.group().isVirtual()) {
                 body.put(String.valueOf(nested.childModuleId()),
-                        renderGroupBodyByProjectionAliases(nested.group(), record, requestedByModule, aliasesByField));
+                        renderGroupBodyByProjectionAliases(nested.group(), record, requestedByModule, aliasesByField, useProjectionAliases));
             } else {
                 Result<Record> childRows = (Result<Record>) record.get(FlatGroupSqlBuilder.nestedAlias(nested.childModuleId()));
                 if (childRows != null) {
                     List<Map<String, Object>> renderedChildren = childRows.stream()
-                            .map(child -> renderGroupBodyByProjectionAliases(nested.group(), child, requestedByModule, copyQueues(aliasesByField)))
+                            .map(child -> renderGroupBodyByProjectionAliases(nested.group(), child, requestedByModule, copyQueues(aliasesByField), useProjectionAliases))
                             .toList();
                     body.put(String.valueOf(nested.childModuleId()), renderedChildren);
                 }
