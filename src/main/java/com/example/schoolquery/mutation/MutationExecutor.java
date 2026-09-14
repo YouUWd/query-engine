@@ -34,16 +34,21 @@ public final class MutationExecutor {
         if(!groups.isEmpty())validatePrimaryWhere(plan.where(),module);
         Condition rootCondition=condition(plan.where());
         int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
-        // Update secondary 1:1 tables before the root table. The relation predicate is a
-        // physical column-to-column subquery, so relation key Java/JDBC types are irrelevant.
-        // Running it first also preserves the original relation keys if the root PK changes.
+
+        // Secondary 1:1 updates are correlated to the root row set. Keeping the
+        // relation comparison column-to-column avoids JDBC key type inference, and
+        // evaluating it before the root UPDATE preserves the original key set.
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
             Field<Object> rootJoin=DSL.field(name(module.primaryTable(),relation.mainField()),Object.class);
             Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
-            Select<?> matchingRoots=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(rootCondition);
-            dsl.update(table(name(targetTable))).set(assignmentMap(secondary,targetTable)).where(targetJoin.in(matchingRoots)).execute();
+            Condition related=exists(selectOne().from(table(name(module.primaryTable())))
+                    .where(rootCondition.and(targetJoin.eq(rootJoin))));
+            dsl.update(table(name(targetTable)))
+                    .set(assignmentMap(secondary,targetTable))
+                    .where(related)
+                    .execute();
         }
         if(root!=null&&!root.isEmpty())updateTable(dsl,module.primaryTable(),root,plan.where());
         return logicalRows;
