@@ -33,6 +33,10 @@ public final class MutationExecutor {
         List<MutationPlan.Assignment> root=groups.remove(key(module.primaryTable()));
         if(!groups.isEmpty()&&whereTouchesNonPrimaryTable(plan.where(),module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
         Condition rootCondition=primaryCondition(plan.where(),module);
+
+        // Resolve the logical root row set before updating any physical table. This
+        // makes secondary writes independent from changes to root columns, including
+        // the root primary key itself.
         Map<String,List<Object>> secondaryKeys=new LinkedHashMap<>();
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
@@ -41,22 +45,33 @@ public final class MutationExecutor {
             List<Object> matching=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(rootCondition).fetch(rootJoin);
             secondaryKeys.put(key(targetTable),matching);
         }
+
         int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
         if(root!=null&&!root.isEmpty())updateTable(dsl,module.primaryTable(),root,plan.where());
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
             List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
-            for(Object value:matching){
-                if(value==null) throw new IllegalArgumentException("Scalar 1:1 relation key cannot be null for " + targetTable + "." + relation.joinField());
-                @SuppressWarnings("unchecked")
-                Field<Object> targetJoin=(Field<Object>)(Field<?>)DSL.field(name(targetTable,relation.joinField()),value.getClass());
-                int changed=dsl.update(table(name(targetTable)))
-                        .set(assignmentMap(secondary,targetTable))
-                        .where(targetJoin.eq(DSL.inline(value)))
-                        .execute();
-                if(changed==0) throw new IllegalStateException("Scalar 1:1 secondary UPDATE matched root relation key " + value + " but updated 0 rows in " + targetTable + "." + relation.joinField());
+            if(matching.isEmpty())continue;
+
+            // The dynamic metadata model deliberately does not carry JDBC data types.
+            // Use jOOQ's plain SQL binding here for the captured FK values rather than
+            // constructing an Object-typed Field predicate, which can cause H2 to bind
+            // the relation key as OTHER and silently miss the indexed numeric FK.
+            String tableSql=dsl.render(name(targetTable));
+            String joinSql=dsl.render(name(targetTable,relation.joinField()));
+            StringBuilder sql=new StringBuilder("update ").append(tableSql).append(" set ");
+            List<Object> bindings=new ArrayList<>();
+            for(int i=0;i<secondary.size();i++){
+                if(i>0)sql.append(", ");
+                SysModuleField meta=registry.field(secondary.get(i).field().fieldId());
+                sql.append(dsl.render(name(targetTable,meta.columnName()))).append(" = ?");
+                bindings.add(secondary.get(i).value());
             }
+            sql.append(" where ").append(joinSql).append(" in (");
+            for(int i=0;i<matching.size();i++){if(i>0)sql.append(", ");sql.append("?");bindings.add(matching.get(i));}
+            sql.append(")");
+            dsl.execute(sql.toString(),bindings.toArray());
         }
         return logicalRows;
     }
