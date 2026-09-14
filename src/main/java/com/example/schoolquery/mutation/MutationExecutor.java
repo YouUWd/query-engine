@@ -33,44 +33,26 @@ public final class MutationExecutor {
         List<MutationPlan.Assignment> root=groups.remove(key(module.primaryTable()));
         if(!groups.isEmpty()&&whereTouchesNonPrimaryTable(plan.where(),module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
         Condition rootCondition=primaryCondition(plan.where(),module);
+        int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
 
-        // Resolve the logical root row set before updating any physical table. This
-        // makes secondary writes independent from changes to root columns, including
-        // the root primary key itself.
-        Map<String,List<Object>> secondaryKeys=new LinkedHashMap<>();
+        // Secondary tables are updated before the root table. The relation predicate is
+        // expressed entirely as a column-to-column subquery, avoiding Java/JDBC type
+        // inference for relation keys and also preserving the original root key set when
+        // the root UPDATE itself changes a primary key.
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
             Field<Object> rootJoin=DSL.field(name(module.primaryTable(),relation.mainField()),Object.class);
-            List<Object> matching=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(rootCondition).fetch(rootJoin);
-            secondaryKeys.put(key(targetTable),matching);
+            Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
+            Select<?> matchingRoots=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(rootCondition);
+            dsl.update(table(name(targetTable)))
+                    .set(assignmentMap(secondary,targetTable))
+                    .where(targetJoin.in(matchingRoots))
+                    .execute();
         }
-
-        int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
         if(root!=null&&!root.isEmpty())updateTable(dsl,module.primaryTable(),root,plan.where());
-        for(List<MutationPlan.Assignment> secondary:groups.values()){
-            String targetTable=tableOf(secondary);
-            SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
-            List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
-            if(matching.isEmpty())continue;
-
-            // Metadata does not carry JDBC types, so derive the relation key type from
-            // the captured root values. Build typed equality terms rather than an
-            // Object/OTHER IN-list, which is not portable across JDBC drivers.
-            Class<?> keyType=commonValueType(matching);
-            Field<?> targetJoin=DSL.field(name(targetTable,relation.joinField()),keyType);
-            Condition relationCondition=null;
-            for(Object value:matching){
-                @SuppressWarnings({"rawtypes","unchecked"}) Condition term=((Field)targetJoin).eq(value);
-                relationCondition=relationCondition==null?term:relationCondition.or(term);
-            }
-            if(relationCondition==null)continue;
-            dsl.update(table(name(targetTable))).set(typedAssignmentMap(secondary,targetTable)).where(relationCondition).execute();
-        }
         return logicalRows;
     }
-    private Class<?> commonValueType(List<Object> values){Class<?> type=null;for(Object value:values){if(value==null)continue;if(type==null){type=value.getClass();continue;}if(!type.isAssignableFrom(value.getClass()))return Object.class;}return type==null?Object.class:type;}
-    private Condition primaryCondition(MutationPlan.Where where,SysModule module){if(whereTouchesNonPrimaryTable(where,module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");return condition(where);}
     private int updateTable(DSLContext dsl,String targetTable,List<MutationPlan.Assignment> assignments,MutationPlan.Where where){return dsl.update(table(name(targetTable))).set(assignmentMap(assignments,targetTable)).where(condition(where)).execute();}
     private int delete(DSLContext dsl,MutationPlan plan){SysModule module=registry.module(plan.rootModuleId());if(hasSecondaryTables(module))throw new IllegalArgumentException("Scalar cross-table DELETE is not supported yet; use aggregate mutation for multi-table DELETE");return dsl.deleteFrom(table(name(module.primaryTable()))).where(condition(plan.where())).execute();}
     private SysTableRelation oneToOneDirectRelation(SysModule module,String targetTable){SysTableRelation relation=relations.relationOfModule(module.id(),targetTable);if(relation.type()!=RelationType.ONE_TO_ONE)throw new IllegalArgumentException("Scalar Module SQL cannot mutate 1:N table "+targetTable+"; use aggregate mutation");return relation;}
@@ -79,7 +61,6 @@ public final class MutationExecutor {
     private boolean whereTouchesNonPrimaryTable(MutationPlan.Where where,SysModule module){if(where==null||where.expression()==null)return false;return whereTouchesNonPrimaryTable(where.expression(),module);}
     private boolean whereTouchesNonPrimaryTable(MutationPlan.Expression expression,SysModule module){if(expression instanceof MutationPlan.PredicateExpression p)return !registry.field(p.predicate().field().fieldId()).tableName().equalsIgnoreCase(module.primaryTable());if(expression instanceof MutationPlan.And a)return whereTouchesNonPrimaryTable(a.left(),module)||whereTouchesNonPrimaryTable(a.right(),module);if(expression instanceof MutationPlan.Or o)return whereTouchesNonPrimaryTable(o.left(),module)||whereTouchesNonPrimaryTable(o.right(),module);return false;}
     private Map<Field<Object>,Object> assignmentMap(List<MutationPlan.Assignment> assignments,String targetTable){Map<Field<Object>,Object> values=new LinkedHashMap<>();for(MutationPlan.Assignment a:assignments){SysModuleField meta=registry.field(a.field().fieldId());values.put(DSL.field(name(targetTable,meta.columnName()),Object.class),a.value());}return values;}
-    private Map<Field<Object>,Object> typedAssignmentMap(List<MutationPlan.Assignment> assignments,String targetTable){Map<Field<Object>,Object> values=new LinkedHashMap<>();for(MutationPlan.Assignment a:assignments){SysModuleField meta=registry.field(a.field().fieldId());Object value=a.value();Class<?> type=value==null?Object.class:value.getClass();@SuppressWarnings("unchecked") Field<Object> target=DSL.field(name(targetTable,meta.columnName()),(Class<Object>)type);values.put(target,value);}return values;}
     private String tableOf(List<MutationPlan.Assignment> assignments){if(assignments.isEmpty())throw new IllegalArgumentException("Mutation assignment group cannot be empty");return registry.field(assignments.get(0).field().fieldId()).tableName();}
     private String key(String table){return table.toLowerCase(Locale.ROOT);}
     private SysModuleField findField(SysModule module,String table,String column){for(List<SysModuleField> fs:registry.fieldsGroupedByTable(module.id()).values())for(SysModuleField f:fs)if(f.tableName().equalsIgnoreCase(table)&&f.columnName().equalsIgnoreCase(column))return f;throw new IllegalArgumentException("Relation column "+table+"."+column+" is not configured in module "+module.id());}
