@@ -54,27 +54,19 @@ public final class MutationExecutor {
             List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
             if(matching.isEmpty())continue;
 
-            // The dynamic metadata model deliberately does not carry JDBC data types.
-            // Use jOOQ's plain SQL binding here for the captured FK values rather than
-            // constructing an Object-typed Field predicate, which can cause H2 to bind
-            // the relation key as OTHER and silently miss the indexed numeric FK.
-            String tableSql=dsl.render(name(targetTable));
-            String joinSql=dsl.render(name(targetTable,relation.joinField()));
-            StringBuilder sql=new StringBuilder("update ").append(tableSql).append(" set ");
-            List<Object> bindings=new ArrayList<>();
-            for(int i=0;i<secondary.size();i++){
-                if(i>0)sql.append(", ");
-                SysModuleField meta=registry.field(secondary.get(i).field().fieldId());
-                sql.append(dsl.render(name(targetTable,meta.columnName()))).append(" = ?");
-                bindings.add(secondary.get(i).value());
-            }
-            sql.append(" where ").append(joinSql).append(" in (");
-            for(int i=0;i<matching.size();i++){if(i>0)sql.append(", ");sql.append("?");bindings.add(matching.get(i));}
-            sql.append(")");
-            dsl.execute(sql.toString(),bindings.toArray());
+            // The metadata layer intentionally does not carry JDBC types. Infer the
+            // relation-key type from the captured values so jOOQ renders a typed bind
+            // value instead of an Object/OTHER bind (notably important for H2).
+            Class<?> keyType=commonValueType(matching);
+            Field<?> targetJoin=DSL.field(name(targetTable,relation.joinField()),keyType);
+            Map<Field<Object>,Object> values=assignmentMap(secondary,targetTable);
+            @SuppressWarnings({"rawtypes","unchecked"})
+            Condition relationCondition=((Field)targetJoin).in(matching);
+            dsl.update(table(name(targetTable))).set(values).where(relationCondition).execute();
         }
         return logicalRows;
     }
+    private Class<?> commonValueType(List<Object> values){Class<?> type=null;for(Object value:values){if(value==null)continue;if(type==null){type=value.getClass();continue;}if(!type.isAssignableFrom(value.getClass()))return Object.class;}return type==null?Object.class:type;}
     private Condition primaryCondition(MutationPlan.Where where,SysModule module){if(whereTouchesNonPrimaryTable(where,module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");return condition(where);}
     private int updateTable(DSLContext dsl,String targetTable,List<MutationPlan.Assignment> assignments,MutationPlan.Where where){return dsl.update(table(name(targetTable))).set(assignmentMap(assignments,targetTable)).where(condition(where)).execute();}
     private int delete(DSLContext dsl,MutationPlan plan){SysModule module=registry.module(plan.rootModuleId());if(hasSecondaryTables(module))throw new IllegalArgumentException("Scalar cross-table DELETE is not supported yet; use aggregate mutation for multi-table DELETE");return dsl.deleteFrom(table(name(module.primaryTable()))).where(condition(plan.where())).execute();}
