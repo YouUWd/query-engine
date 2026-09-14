@@ -76,19 +76,14 @@ public final class AggregateMutationExecutor {
         return count;
     }
 
-    /** Resolve the parent-child FK in the parent's module context, never by a global table pair. */
+    /** Resolve the parent-child FK from the module-tree edge, never from the parent's table set. */
     private void applyParentForeignKey(SysModule child, SysModule parent, Object parentKey,
                                        Map<SysModuleField, Object> values) {
         if (child.primaryTable().equals(parent.primaryTable())) return;
-        SysTableRelation rel = relations.relationOfModule(parent.id(), child.primaryTable());
+        SysTableRelation rel = relations.parentChildRelation(parent, child);
         values.putIfAbsent(findColumn(child, rel.joinField()), parentKey);
     }
 
-    /**
-     * FULL_SYNC means the supplied child mutation list is the complete desired child set.
-     * Mutations are grouped by child module so multiple rows of one child module share one
-     * keep-set and are deleted atomically as a group.
-     */
     private int removeOrphans(DSLContext dsl, SysModule parent, Object parentKey,
                               List<AggregateMutation> children) {
         Map<Long, List<AggregateMutation>> byModule = new LinkedHashMap<>();
@@ -98,7 +93,7 @@ public final class AggregateMutationExecutor {
         for (List<AggregateMutation> mutations : byModule.values()) {
             SysModule child = registry.module(mutations.get(0).moduleId());
             if (child.primaryTable().equals(parent.primaryTable())) continue;
-            SysTableRelation rel = relations.relationOfModule(parent.id(), child.primaryTable());
+            SysTableRelation rel = relations.parentChildRelation(parent, child);
             SysModuleField fk = findColumn(child, rel.joinField());
             SysModuleField pk = primaryKeyField(child);
             if (pk == null) continue;
