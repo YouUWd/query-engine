@@ -118,25 +118,24 @@ public final class MutationExecutor {
         Condition rootCondition = condition(plan.where());
         int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), rootCondition);
 
-        // Secondary 1:1 updates are correlated to the same root row set through
-        // a subquery. This deliberately keeps the relation key as a SQL
-        // column-to-column comparison, avoiding JDBC/Java type inference for
-        // relation key values (Integer vs Long, UUID, etc.). Secondary updates
-        // happen before the root update so a root-key change cannot invalidate
-        // the relation set.
+        // Secondary 1:1 updates are correlated to the same root row set with a
+        // correlated EXISTS. Unlike fetching relation keys into Java or relying
+        // on an IN subquery's inferred type, this keeps the relation as a pure
+        // column-to-column predicate and lets the database resolve both column
+        // types. It also makes the correlation explicit in the generated SQL.
         for (List<MutationPlan.Assignment> secondary : groups.values()) {
             String targetTable = tableOf(secondary);
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
             Field<Object> rootJoin = DSL.field(name(module.primaryTable(), relation.mainField()), Object.class);
             Field<Object> targetJoin = DSL.field(name(targetTable, relation.joinField()), Object.class);
 
-            Select<?> rootKeys = select(rootJoin)
-                    .from(table(name(module.primaryTable())))
-                    .where(rootCondition);
-
+            Condition correlated = rootCondition.and(rootJoin.eq(targetJoin));
             dsl.update(table(name(targetTable)))
                     .set(assignmentMap(secondary, targetTable))
-                    .where(targetJoin.in(rootKeys))
+                    .where(exists(
+                            selectOne()
+                                    .from(table(name(module.primaryTable())))
+                                    .where(correlated)))
                     .execute();
         }
 
