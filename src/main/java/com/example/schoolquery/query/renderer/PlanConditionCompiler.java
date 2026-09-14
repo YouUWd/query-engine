@@ -1,0 +1,43 @@
+
+package com.example.schoolquery.query.renderer;
+import com.example.schoolquery.query.model.*;
+import com.example.schoolquery.query.resolver.*;
+import com.example.schoolquery.query.renderer.*;
+import com.example.schoolquery.result.*;
+import com.example.schoolquery.sql.parser.*;
+import com.example.schoolquery.query.compiler.*;
+import com.example.schoolquery.query.executor.*;
+import com.example.schoolquery.mutation.model.*;
+import com.example.schoolquery.mutation.executor.*;
+import com.example.schoolquery.mutation.compiler.*;
+
+
+import com.example.schoolquery.metadata.MetadataRegistry;
+import com.example.schoolquery.metadata.SysModule;
+import com.example.schoolquery.metadata.SysModuleField;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import java.util.*;
+import static org.jooq.impl.DSL.*;
+
+/** Converts logical filters to jOOQ conditions; descendant predicates become correlated EXISTS chains. */
+public final class PlanConditionCompiler {
+    private final MetadataRegistry registry; private final LogicalRelationResolver relations;
+    public PlanConditionCompiler(MetadataRegistry registry){this.registry=Objects.requireNonNull(registry,"registry");this.relations=new LogicalRelationResolver(registry);}
+    public PlanConditionCompiler(MetadataRegistry registry,Object ignoredRelationResolver){this(registry);}
+    public Condition compile(DSLContext dsl,long rootModuleId,FilterExpressionPlan expression){return expression==null?trueCondition():compileExpression(dsl,rootModuleId,expression);}
+    public Condition compileLocal(DSLContext dsl,long targetModuleId,FilterExpressionPlan expression){FilterExpressionPlan projected=projectLocal(targetModuleId,expression);return projected==null?trueCondition():compileExpression(dsl,targetModuleId,projected);}
+    private FilterExpressionPlan projectLocal(long target,FilterExpressionPlan expression){if(expression instanceof FilterExpressionPlan.Predicate p)return isInSubtree(target,p.filter())?expression:null;if(expression instanceof FilterExpressionPlan.And a){List<FilterExpressionPlan> kept=new ArrayList<>();for(FilterExpressionPlan child:a.children()){FilterExpressionPlan x=projectLocal(target,child);if(x!=null)kept.add(x);}if(kept.isEmpty())return null;if(kept.size()==1)return kept.get(0);return new FilterExpressionPlan.And(kept);}if(expression instanceof FilterExpressionPlan.Or o){List<FilterExpressionPlan> kept=new ArrayList<>();for(FilterExpressionPlan child:o.children()){FilterExpressionPlan x=projectLocal(target,child);if(x==null)return null;kept.add(x);}return new FilterExpressionPlan.Or(kept);}throw new IllegalArgumentException("Unsupported filter expression: "+expression);}
+    private boolean isInSubtree(long target,FilterPlan filter){return registry.ancestorChain(filter.field().moduleId()).contains(target);}
+    private Condition compileExpression(DSLContext dsl,long rootId,FilterExpressionPlan expression){if(expression instanceof FilterExpressionPlan.Predicate p)return compilePredicate(dsl,rootId,p.filter());if(expression instanceof FilterExpressionPlan.And a){Condition r=trueCondition();for(FilterExpressionPlan c:a.children())r=r.and(compileExpression(dsl,rootId,c));return r;}if(expression instanceof FilterExpressionPlan.Or o){Condition r=falseCondition();for(FilterExpressionPlan c:o.children())r=r.or(compileExpression(dsl,rootId,c));return r;}throw new IllegalArgumentException("Unsupported filter expression: "+expression);}
+    private Condition compilePredicate(DSLContext dsl,long rootId,FilterPlan filter){SysModuleField meta=registry.field(filter.field().fieldId());SysModule owner=registry.module(meta.moduleId());SysModule root=registry.module(rootId);if(owner.id()==root.id()||samePhysicalEntity(root,owner))return predicateCondition(qualifiedField(meta),filter);return descendantExists(dsl,root,owner,meta,filter);}
+    private Condition descendantExists(DSLContext dsl,SysModule root,SysModule owner,SysModuleField meta,FilterPlan filter){List<SysModule> path=modulePath(root,owner);if(path.size()<2)return predicateCondition(qualifiedField(meta),filter);SysModule leaf=path.get(path.size()-1);Table<?> leafTable=table(name(leaf.primaryTable()));Condition inner=predicateCondition(DSL.field(name(leaf.primaryTable(),meta.columnName()),Object.class),filter);SysModule child=leaf;for(int i=path.size()-2;i>=0;i--){SysModule parent=path.get(i);ResolvedRelationPlan rel=relations.resolve(parent.id(),child.id());if(rel.parentColumn().isBlank()||rel.childColumn().isBlank())throw new IllegalArgumentException("No physical key mapping for module relation "+parent.id()+" -> "+child.id());Table<?> pt=table(name(parent.primaryTable()));Table<?> ct=table(name(child.primaryTable()));Field<Object> pk=DSL.field(name(parent.primaryTable(),rel.parentColumn()),Object.class);Field<Object> ck=DSL.field(name(child.primaryTable(),rel.childColumn()),Object.class);inner=inner.and(pk.eq(ck));inner=exists(dsl.selectOne().from(ct).where(inner));child=parent;}return inner;}
+    private List<SysModule> modulePath(SysModule root,SysModule owner){List<Long> chain=registry.ancestorChain(owner.id());Collections.reverse(chain);List<SysModule> result=new ArrayList<>();boolean started=false;for(long id:chain){SysModule m=registry.module(id);if(m.id()==root.id())started=true;if(!started||m.isVirtual())continue;if(result.isEmpty()||!result.get(result.size()-1).primaryTable().equals(m.primaryTable()))result.add(m);}if(result.isEmpty()||result.get(0).id()!=root.id())throw new IllegalArgumentException("field module is outside root module");return result;}
+    private boolean samePhysicalEntity(SysModule root,SysModule owner){return root.primaryTable().equals(owner.primaryTable())&&registry.ancestorChain(owner.id()).contains(root.id());}
+    private Condition predicateCondition(Field<Object> f,FilterPlan p){return switch(p.operator()){case EQ->f.eq(p.value());case NE->f.ne(p.value());case GT->f.gt(p.value());case GE->f.ge(p.value());case LT->f.lt(p.value());case LE->f.le(p.value());case LIKE->f.like(String.valueOf(p.value()));case IN->f.in(asList(p.value()));case BETWEEN->{List<?> v=asList(p.value());if(v.size()!=2)throw new IllegalArgumentException("BETWEEN requires exactly two values");yield f.between(v.get(0),v.get(1));}case IS_NULL->f.isNull();case IS_NOT_NULL->f.isNotNull();};}
+    private List<?> asList(Object v){return v instanceof Collection<?> c?List.copyOf(c):List.of(v);}
+    private Field<Object> qualifiedField(SysModuleField f){return DSL.field(name(f.tableName(),f.columnName()),Object.class);}
+}

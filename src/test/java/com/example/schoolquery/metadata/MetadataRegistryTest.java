@@ -1,8 +1,8 @@
 package com.example.schoolquery.metadata;
 
 import com.example.schoolquery.TestDatabases;
-import com.example.schoolquery.model.SysModule;
-import com.example.schoolquery.model.SysModuleField;
+import com.example.schoolquery.metadata.SysModule;
+import com.example.schoolquery.metadata.SysModuleField;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;

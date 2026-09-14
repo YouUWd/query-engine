@@ -1,13 +1,13 @@
 package com.example.schoolquery.service;
 
 import com.example.schoolquery.metadata.MetadataRegistry;
-import com.example.schoolquery.model.SysModuleField;
+import com.example.schoolquery.metadata.SysModuleField;
 import com.example.schoolquery.permission.PermissionContext;
 import com.example.schoolquery.permission.PermissionRegistry;
-import com.example.schoolquery.querytree.FlatGroup;
-import com.example.schoolquery.querytree.QueryTreeBuilder;
-import com.example.schoolquery.relation.RelationResolver;
-import com.example.schoolquery.sql.FlatGroupSqlBuilder;
+import com.example.schoolquery.query.resolver.FlatGroup;
+import com.example.schoolquery.query.resolver.QueryTreeBuilder;
+import com.example.schoolquery.query.resolver.RelationResolver;
+import com.example.schoolquery.query.renderer.FlatGroupSqlBuilder;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Record;
