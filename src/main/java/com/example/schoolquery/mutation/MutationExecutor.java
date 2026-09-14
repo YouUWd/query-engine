@@ -1,6 +1,7 @@
 package com.example.schoolquery.mutation;
 
 import com.example.schoolquery.metadata.MetadataRegistry;
+import com.example.schoolquery.model.RelationType;
 import com.example.schoolquery.model.SysModule;
 import com.example.schoolquery.model.SysModuleField;
 import com.example.schoolquery.model.SysTableRelation;
@@ -32,18 +33,61 @@ public final class MutationExecutor {
     }
 
     private MutationExecutionResult insert(DSLContext dsl, MutationPlan plan) {
-        Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
         SysModule module = registry.module(plan.rootModuleId());
-        if (groups.size() > 1 || (groups.size() == 1 && !groups.containsKey(key(module.primaryTable()))))
-            throw new IllegalArgumentException("Scalar cross-table INSERT is not supported yet; use aggregate mutation for multi-table INSERT");
+        Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
+        List<MutationPlan.Assignment> root = groups.remove(key(module.primaryTable()));
+        if (root == null) root = List.of();
+
+        Object rootKey = insertRoot(dsl, module, root);
+        int logicalRows = 1;
+        for (List<MutationPlan.Assignment> secondary : groups.values()) {
+            String targetTable = tableOf(secondary);
+            SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
+            Object relationValue = relationValue(module, root, rootKey, relation.mainField());
+            insertSecondary(dsl, module, targetTable, secondary, relation, relationValue);
+        }
+        return new MutationExecutionResult(logicalRows, rootKey == null ? List.of() : List.of(rootKey));
+    }
+
+    private Object insertRoot(DSLContext dsl, SysModule module, List<MutationPlan.Assignment> assignments) {
         Table<?> table = table(name(module.primaryTable()));
-        Map<Field<Object>, Object> values = assignmentMap(plan.assignments());
+        Map<Field<Object>, Object> values = assignmentMap(assignments);
         SysModuleField primaryKey = primaryKeyField(module.id());
-        if (primaryKey == null || plan.assignments().stream().anyMatch(a -> a.field().fieldId() == primaryKey.id()))
-            return new MutationExecutionResult(dsl.insertInto(table).set(values).execute(), List.of());
+        boolean explicitPk = primaryKey != null && assignments.stream().anyMatch(a -> a.field().fieldId() == primaryKey.id());
+        if (primaryKey == null || explicitPk) {
+            dsl.insertInto(table).set(values).execute();
+            return explicitPk ? assignmentValue(assignments, primaryKey) : null;
+        }
         Field<Object> keyField = field(primaryKey);
-        Object generatedKey = dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);
-        return new MutationExecutionResult(1, generatedKey == null ? List.of() : List.of(generatedKey));
+        return dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);
+    }
+
+    private void insertSecondary(DSLContext dsl, SysModule module, String targetTable,
+                                 List<MutationPlan.Assignment> assignments, SysTableRelation relation, Object relationValue) {
+        SysModuleField relationField = findField(module, targetTable, relation.joinField());
+        Map<Field<Object>, Object> values = assignmentMap(assignments);
+        Field<Object> fk = field(relationField);
+        Object existing = values.get(fk);
+        if (existing != null && !Objects.equals(existing, relationValue))
+            throw new IllegalArgumentException("Explicit 1:1 relation value conflicts with root relation for " + targetTable + "." + relation.joinField());
+        values.putIfAbsent(fk, relationValue);
+
+        Table<?> table = table(name(targetTable));
+        SysModuleField primaryKey = primaryKeyFieldForTable(module.id(), targetTable);
+        boolean explicitPk = primaryKey != null && assignments.stream().anyMatch(a -> a.field().fieldId() == primaryKey.id());
+        if (primaryKey == null || explicitPk) {
+            dsl.insertInto(table).set(values).execute();
+            return;
+        }
+        dsl.insertInto(table).set(values).returning(field(primaryKey)).fetchOne(field(primaryKey));
+    }
+
+    private Object relationValue(SysModule module, List<MutationPlan.Assignment> root, Object rootKey, String mainField) {
+        SysModuleField pk = primaryKeyField(module.id());
+        if (pk != null && pk.columnName().equalsIgnoreCase(mainField)) return rootKey;
+        Object value = assignmentValueByColumn(module, root, mainField);
+        if (value == null) throw new IllegalArgumentException("1:1 relation main field " + module.primaryTable() + "." + mainField + " must be provided by the root INSERT");
+        return value;
     }
 
     private int update(DSLContext dsl, MutationPlan plan) {
@@ -62,13 +106,8 @@ public final class MutationExecutor {
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
             Field<Object> targetJoin = field(name(targetTable, relation.joinField()), Object.class);
             Field<Object> rootJoin = field(name(module.primaryTable(), relation.mainField()), Object.class);
-            Select<Record1<Object>> matching = dsl.select(rootJoin)
-                    .from(table(name(module.primaryTable())))
-                    .where(condition(plan.where()));
-            dsl.update(table(name(targetTable)))
-                    .set(assignmentMap(secondary))
-                    .where(targetJoin.in(matching))
-                    .execute();
+            Select<Record1<Object>> matching = dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(condition(plan.where()));
+            dsl.update(table(name(targetTable))).set(assignmentMap(secondary)).where(targetJoin.in(matching)).execute();
         }
         return logicalRows;
     }
@@ -86,7 +125,7 @@ public final class MutationExecutor {
 
     private SysTableRelation oneToOneDirectRelation(SysModule module, String targetTable) {
         SysTableRelation relation = relations.relationOfModule(module.id(), targetTable);
-        if (relation.type() != com.example.schoolquery.model.RelationType.ONE_TO_ONE)
+        if (relation.type() != RelationType.ONE_TO_ONE)
             throw new IllegalArgumentException("Scalar Module SQL cannot mutate 1:N table " + targetTable + "; use aggregate mutation");
         return relation;
     }
@@ -131,6 +170,32 @@ public final class MutationExecutor {
     }
 
     private String key(String table) { return table.toLowerCase(Locale.ROOT); }
+
+    private SysModuleField findField(SysModule module, String table, String column) {
+        for (List<SysModuleField> fs : registry.fieldsGroupedByTable(module.id()).values())
+            for (SysModuleField f : fs) if (f.tableName().equalsIgnoreCase(table) && f.columnName().equalsIgnoreCase(column)) return f;
+        throw new IllegalArgumentException("Relation column " + table + "." + column + " is not configured in module " + module.id());
+    }
+
+    private Object assignmentValue(List<MutationPlan.Assignment> assignments, SysModuleField field) {
+        if (field == null) return null;
+        for (MutationPlan.Assignment a : assignments) if (a.field().fieldId() == field.id()) return a.value();
+        return null;
+    }
+
+    private Object assignmentValueByColumn(SysModule module, List<MutationPlan.Assignment> assignments, String column) {
+        for (MutationPlan.Assignment a : assignments) {
+            SysModuleField f = registry.field(a.field().fieldId());
+            if (f.tableName().equalsIgnoreCase(module.primaryTable()) && f.columnName().equalsIgnoreCase(column)) return a.value();
+        }
+        return null;
+    }
+
+    private SysModuleField primaryKeyFieldForTable(long moduleId, String table) {
+        for (List<SysModuleField> fs : registry.fieldsGroupedByTable(moduleId).values())
+            for (SysModuleField f : fs) if (f.tableName().equalsIgnoreCase(table) && "id".equalsIgnoreCase(f.columnName())) return f;
+        return null;
+    }
 
     private Condition condition(MutationPlan.Where where) {
         if (where == null || where.expression() == null) return trueCondition();
