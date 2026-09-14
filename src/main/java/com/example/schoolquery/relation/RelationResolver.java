@@ -39,16 +39,27 @@ public class RelationResolver {
         return ModuleRelationKind.CHILD;
     }
 
+    /** Resolve the physical FK relation for an actual parent-module/child-module edge. */
+    public SysTableRelation parentChildRelation(SysModule parent, SysModule child) {
+        if (parent.primaryTable().equals(child.primaryTable())) return null;
+        SysTableRelation relation = relationOf(parent.primaryTable(), child.primaryTable());
+        if (relation.type() != RelationType.ONE_TO_MANY) {
+            throw new MetadataValidationException("父模块 " + parent.id() + " 与子模块 " + child.id()
+                    + " 的物理关系不是 1:N，不能作为聚合子节点 FK");
+        }
+        if (relation.mainTable().equals(parent.primaryTable()) && relation.joinTable().equals(child.primaryTable())) return relation;
+        if (relation.joinTable().equals(parent.primaryTable()) && relation.mainTable().equals(child.primaryTable())) {
+            return new SysTableRelation(relation.id(), relation.joinTable(), relation.joinField(),
+                    relation.mainTable(), relation.mainField(), relation.type());
+        }
+        throw new MetadataValidationException("父模块 " + parent.id() + " 与子模块 " + child.id() + " 的关系表无法与模块主表匹配");
+    }
+
     /**
      * Resolves the unique shortest physical relation path from the owning module's primary table
      * to a requested secondary table. Traversal is strictly limited to tables configured on that
      * module, so unrelated physical tables can never be introduced merely because a global
      * table graph happens to connect them.
-     *
-     * <p>Every returned relation is oriented in traversal direction: its {@code mainTable()} is
-     * the table reached from the previous path node and its {@code joinTable()} is the next node.
-     * This keeps the physical join plan independent of the declaration direction in
-     * {@code sys_table_relation}.</p>
      */
     public List<SysTableRelation> relationPathOfModule(long ownerModuleId, String otherTable) {
         SysModule owner = registry.module(ownerModuleId);
