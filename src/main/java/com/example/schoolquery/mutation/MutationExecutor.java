@@ -26,7 +26,46 @@ public final class MutationExecutor {
     private Object insertRoot(DSLContext dsl,SysModule module,List<MutationPlan.Assignment> assignments){Table<?> table=table(name(module.primaryTable()));Map<Field<Object>,Object> values=assignmentMap(assignments,module.primaryTable());SysModuleField pk=primaryKeyField(module.id());boolean explicit=pk!=null&&assignments.stream().anyMatch(a->a.field().fieldId()==pk.id());if(pk==null||explicit){dsl.insertInto(table).set(values).execute();return explicit?assignmentValue(assignments,pk):null;}Field<Object> keyField=field(pk);return dsl.insertInto(table).set(values).returning(keyField).fetchOne(keyField);}
     private void insertSecondary(DSLContext dsl,SysModule module,String targetTable,List<MutationPlan.Assignment> assignments,SysTableRelation relation,Object relationValue){findField(module,targetTable,relation.joinField());Map<Field<Object>,Object> values=assignmentMap(assignments,targetTable);Field<Object> fk=DSL.field(name(targetTable,relation.joinField()),Object.class);Object existing=values.get(fk);if(existing!=null&&!Objects.equals(existing,relationValue))throw new IllegalArgumentException("Explicit 1:1 relation value conflicts with root relation for "+targetTable+"."+relation.joinField());values.putIfAbsent(fk,relationValue);Table<?> table=table(name(targetTable));SysModuleField pk=primaryKeyFieldForTable(module.id(),targetTable);boolean explicit=pk!=null&&assignments.stream().anyMatch(a->a.field().fieldId()==pk.id());if(pk==null||explicit){dsl.insertInto(table).set(values).execute();return;}dsl.insertInto(table).set(values).returning(field(pk)).fetchOne(field(pk));}
     private Object relationValue(SysModule module,List<MutationPlan.Assignment> root,Object rootKey,String mainField){SysModuleField pk=primaryKeyField(module.id());if(pk!=null&&pk.columnName().equalsIgnoreCase(mainField))return rootKey;Object value=assignmentValueByColumn(module,root,mainField);if(value==null)throw new IllegalArgumentException("1:1 relation main field "+module.primaryTable()+"."+mainField+" must be provided by the root INSERT");return value;}
-    private int update(DSLContext dsl,MutationPlan plan){SysModule module=registry.module(plan.rootModuleId());Map<String,List<MutationPlan.Assignment>> groups=assignmentsByTable(plan);if(groups.isEmpty())throw new IllegalArgumentException("UPDATE has no assignments");List<MutationPlan.Assignment> root=groups.remove(key(module.primaryTable()));if(!groups.isEmpty()&&whereTouchesNonPrimaryTable(plan.where(),module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),primaryCondition(plan.where(),module));if(root!=null&&!root.isEmpty())updateTable(dsl,module.primaryTable(),root,plan.where());for(List<MutationPlan.Assignment> secondary:groups.values()){String targetTable=tableOf(secondary);SysTableRelation relation=oneToOneDirectRelation(module,targetTable);Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);Field<Object> rootJoin=DSL.field(name(module.primaryTable(),relation.mainField()),Object.class);List<Object> matching=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(primaryCondition(plan.where(),module)).fetch(rootJoin);if(!matching.isEmpty())dsl.update(table(name(targetTable))).set(assignmentMap(secondary,targetTable)).where(targetJoin.in(matching)).execute();}return logicalRows;}
+    private int update(DSLContext dsl,MutationPlan plan){
+        SysModule module=registry.module(plan.rootModuleId());
+        Map<String,List<MutationPlan.Assignment>> groups=assignmentsByTable(plan);
+        if(groups.isEmpty())throw new IllegalArgumentException("UPDATE has no assignments");
+        List<MutationPlan.Assignment> root=groups.remove(key(module.primaryTable()));
+        if(!groups.isEmpty()&&whereTouchesNonPrimaryTable(plan.where(),module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
+        Condition rootCondition=primaryCondition(plan.where(),module);
+
+        // Capture the relation keys before changing the root table. This both avoids
+        // database-specific UPDATE/subquery behaviour and keeps secondary-table
+        // updates tied to the original logical root row set when the primary key
+        // itself is part of the UPDATE assignment.
+        Map<String,List<Object>> secondaryKeys=new LinkedHashMap<>();
+        for(List<MutationPlan.Assignment> secondary:groups.values()){
+            String targetTable=tableOf(secondary);
+            SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
+            Field<Object> rootJoin=DSL.field(name(module.primaryTable(),relation.mainField()),Object.class);
+            List<Object> matching=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(rootCondition).fetch(rootJoin);
+            secondaryKeys.put(key(targetTable),matching);
+        }
+
+        int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
+        if(root!=null&&!root.isEmpty())updateTable(dsl,module.primaryTable(),root,plan.where());
+        for(List<MutationPlan.Assignment> secondary:groups.values()){
+            String targetTable=tableOf(secondary);
+            SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
+            Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
+            List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
+            // Use one equality predicate per 1:1 root key instead of relying on a
+            // dialect-specific rendering of Field.in(Collection) with Object-typed
+            // fields. This is deliberately small (1:1) and robust across dialects.
+            for(Object value:matching){
+                dsl.update(table(name(targetTable)))
+                        .set(assignmentMap(secondary,targetTable))
+                        .where(targetJoin.eq(value))
+                        .execute();
+            }
+        }
+        return logicalRows;
+    }
     private Condition primaryCondition(MutationPlan.Where where,SysModule module){if(whereTouchesNonPrimaryTable(where,module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");return condition(where);}
     private int updateTable(DSLContext dsl,String targetTable,List<MutationPlan.Assignment> assignments,MutationPlan.Where where){return dsl.update(table(name(targetTable))).set(assignmentMap(assignments,targetTable)).where(condition(where)).execute();}
     private int delete(DSLContext dsl,MutationPlan plan){SysModule module=registry.module(plan.rootModuleId());if(hasSecondaryTables(module))throw new IllegalArgumentException("Scalar cross-table DELETE is not supported yet; use aggregate mutation for multi-table DELETE");return dsl.deleteFrom(table(name(module.primaryTable()))).where(condition(plan.where())).execute();}
