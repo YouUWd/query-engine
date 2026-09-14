@@ -27,16 +27,16 @@ public class RecordRenderer {
                         .add(aliasesByFieldId.getOrDefault(field.id(), field.columnName()));
             }
         }
-        return renderRecord(rootModuleId, rootGroup, record, requestedByModule, occurrences);
+        return renderRecordWithAliases(rootModuleId, rootGroup, record, requestedByModule, occurrences);
     }
 
-    public Map<String, Object> renderRecord(long rootModuleId, FlatGroup rootGroup, Record record,
-                                             Map<Long, List<SysModuleField>> requestedByModule,
-                                             Map<LogicalFieldRef, List<String>> aliasesByField) {
+    public Map<String, Object> renderRecordWithAliases(long rootModuleId, FlatGroup rootGroup, Record record,
+                                                        Map<Long, List<SysModuleField>> requestedByModule,
+                                                        Map<LogicalFieldRef, List<String>> aliasesByField) {
         Map<LogicalFieldRef, Deque<String>> occurrences = new LinkedHashMap<>();
         aliasesByField.forEach((ref, aliases) -> occurrences.put(ref, new ArrayDeque<>(aliases)));
         Map<String, Object> wrapped = new LinkedHashMap<>();
-        wrapped.put(String.valueOf(rootModuleId), renderGroupBody(rootGroup, record, requestedByModule, occurrences));
+        wrapped.put(String.valueOf(rootModuleId), renderGroupBodyWithAliasQueues(rootGroup, record, requestedByModule, occurrences));
         return wrapped;
     }
 
@@ -57,12 +57,12 @@ public class RecordRenderer {
         }
         Map<LogicalFieldRef, Deque<String>> queues = new LinkedHashMap<>();
         occurrences.forEach((ref, aliases) -> queues.put(ref, new ArrayDeque<>(aliases)));
-        return renderGroupBody(group, record, requestedByModule, queues);
+        return renderGroupBodyWithAliasQueues(group, record, requestedByModule, queues);
     }
 
-    private Map<String, Object> renderGroupBody(FlatGroup group, Record record,
-                                                  Map<Long, List<SysModuleField>> requestedByModule,
-                                                  Map<LogicalFieldRef, Deque<String>> aliasesByField) {
+    private Map<String, Object> renderGroupBodyWithAliasQueues(FlatGroup group, Record record,
+                                                                 Map<Long, List<SysModuleField>> requestedByModule,
+                                                                 Map<LogicalFieldRef, Deque<String>> aliasesByField) {
         Map<String, Object> tableBuckets = new LinkedHashMap<>();
         for (long moduleId : group.mergedModuleIds()) {
             for (SysModuleField f : requestedByModule.getOrDefault(moduleId, List.of())) {
@@ -78,12 +78,12 @@ public class RecordRenderer {
         for (NestedGroup nested : group.nestedChildren()) {
             if (nested.group().isVirtual()) {
                 body.put(String.valueOf(nested.childModuleId()),
-                        renderGroupBody(nested.group(), record, requestedByModule, aliasesByField));
+                        renderGroupBodyWithAliasQueues(nested.group(), record, requestedByModule, aliasesByField));
             } else {
                 Result<Record> childRows = (Result<Record>) record.get(FlatGroupSqlBuilder.nestedAlias(nested.childModuleId()));
                 if (childRows != null) {
                     List<Map<String, Object>> renderedChildren = childRows.stream()
-                            .map(child -> renderGroupBody(nested.group(), child, requestedByModule, copyQueues(aliasesByField)))
+                            .map(child -> renderGroupBodyWithAliasQueues(nested.group(), child, requestedByModule, copyQueues(aliasesByField)))
                             .toList();
                     body.put(String.valueOf(nested.childModuleId()), renderedChildren);
                 }
