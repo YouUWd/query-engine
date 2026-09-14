@@ -34,9 +34,8 @@ public final class MutationExecutor {
     private MutationExecutionResult insert(DSLContext dsl, MutationPlan plan) {
         Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
         SysModule module = registry.module(plan.rootModuleId());
-        if (groups.size() > 1 || (groups.size() == 1 && !groups.containsKey(key(module.primaryTable())))) {
+        if (groups.size() > 1 || (groups.size() == 1 && !groups.containsKey(key(module.primaryTable()))))
             throw new IllegalArgumentException("Scalar cross-table INSERT is not supported yet; use aggregate mutation for multi-table INSERT");
-        }
         Table<?> table = table(name(module.primaryTable()));
         Map<Field<Object>, Object> values = assignmentMap(plan.assignments());
         SysModuleField primaryKey = primaryKeyField(module.id());
@@ -52,9 +51,8 @@ public final class MutationExecutor {
         Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
         if (groups.isEmpty()) throw new IllegalArgumentException("UPDATE has no assignments");
         List<MutationPlan.Assignment> root = groups.remove(key(module.primaryTable()));
-        if (!groups.isEmpty() && whereTouchesNonPrimaryTable(plan.where(), module)) {
+        if (!groups.isEmpty() && whereTouchesNonPrimaryTable(plan.where(), module))
             throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
-        }
 
         int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), condition(plan.where()));
         if (root != null && !root.isEmpty()) updateTable(dsl, module.primaryTable(), root, plan.where());
@@ -64,7 +62,7 @@ public final class MutationExecutor {
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
             Field<Object> targetJoin = field(name(targetTable, relation.joinField()), Object.class);
             Field<Object> rootJoin = field(name(module.primaryTable(), relation.mainField()), Object.class);
-            Select<?> matching = dsl.select(rootJoin)
+            Select<Record1<Object>> matching = dsl.select(rootJoin)
                     .from(table(name(module.primaryTable())))
                     .where(condition(plan.where()));
             dsl.update(table(name(targetTable)))
@@ -81,9 +79,8 @@ public final class MutationExecutor {
 
     private int delete(DSLContext dsl, MutationPlan plan) {
         SysModule module = registry.module(plan.rootModuleId());
-        if (hasSecondaryTables(module)) {
+        if (hasSecondaryTables(module))
             throw new IllegalArgumentException("Scalar cross-table DELETE is not supported yet; use aggregate mutation for multi-table DELETE");
-        }
         return dsl.deleteFrom(table(name(module.primaryTable()))).where(condition(plan.where())).execute();
     }
 
@@ -115,9 +112,8 @@ public final class MutationExecutor {
     }
 
     private boolean whereTouchesNonPrimaryTable(MutationPlan.Expression expression, SysModule module) {
-        if (expression instanceof MutationPlan.PredicateExpression p) {
+        if (expression instanceof MutationPlan.PredicateExpression p)
             return !registry.field(p.predicate().field().fieldId()).tableName().equalsIgnoreCase(module.primaryTable());
-        }
         if (expression instanceof MutationPlan.And a) return whereTouchesNonPrimaryTable(a.left(), module) || whereTouchesNonPrimaryTable(a.right(), module);
         if (expression instanceof MutationPlan.Or o) return whereTouchesNonPrimaryTable(o.left(), module) || whereTouchesNonPrimaryTable(o.right(), module);
         return false;
