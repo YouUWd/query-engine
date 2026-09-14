@@ -15,6 +15,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -141,8 +142,7 @@ class AggregateMutationExecutorTest {
     @Test
     void deleteCascadesBottomUp() throws Exception {
         AggregateMutation mutation = new AggregateMutation(AggregateMutation.Operation.DELETE, 1,
-                Map.of("f101", 1),
-                List.of(), AggregateMutation.SaveMode.PATCH, false);
+                Map.of("f101", 1), List.of(), AggregateMutation.SaveMode.PATCH, false);
 
         DSLContext dsl = dsl();
         assertEquals(6, executor().execute(dsl, mutation));
