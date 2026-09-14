@@ -6,6 +6,7 @@ import com.example.schoolquery.model.SysModuleField;
 import com.example.schoolquery.plan.LogicalFieldRef;
 import net.sf.jsqlparser.expression.*;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
+import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
 import net.sf.jsqlparser.expression.operators.relational.*;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statement;
@@ -81,15 +82,22 @@ public final class MutationCompiler {
     }
 
     private MutationPlan.Where where(long moduleId, Expression e) {
-        if (e == null) return null; List<MutationPlan.Predicate> p = new ArrayList<>(); collectWhere(moduleId, e, p); return new MutationPlan.Where(p);
+        return e == null ? null : new MutationPlan.Where(compileWhereExpression(moduleId, e));
     }
 
-    private void collectWhere(long moduleId, Expression e, List<MutationPlan.Predicate> out) {
-        if (e instanceof AndExpression a) { collectWhere(moduleId, a.getLeftExpression(), out); collectWhere(moduleId, a.getRightExpression(), out); return; }
-        if (e instanceof IsNullExpression x) { out.add(new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), x.isNot() ? "IS_NOT_NULL" : "IS_NULL", null)); return; }
-        if (e instanceof Between x) { out.add(new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), "BETWEEN", List.of(literal(x.getBetweenExpressionStart().toString()), literal(x.getBetweenExpressionEnd().toString())))); return; }
-        if (e instanceof InExpression x) { String text = x.getRightExpression() == null ? "" : x.getRightExpression().toString(); out.add(new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), x.isNot() ? "NOT_IN" : "IN", parseList(text))); return; }
-        if (e instanceof BinaryExpression x) { out.add(new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), operator(x), literal(x.getRightExpression().toString()))); return; }
+    private MutationPlan.Expression compileWhereExpression(long moduleId, Expression e) {
+        if (e instanceof AndExpression a)
+            return new MutationPlan.And(compileWhereExpression(moduleId, a.getLeftExpression()), compileWhereExpression(moduleId, a.getRightExpression()));
+        if (e instanceof OrExpression o)
+            return new MutationPlan.Or(compileWhereExpression(moduleId, o.getLeftExpression()), compileWhereExpression(moduleId, o.getRightExpression()));
+        return new MutationPlan.PredicateExpression(predicate(moduleId, e));
+    }
+
+    private MutationPlan.Predicate predicate(long moduleId, Expression e) {
+        if (e instanceof IsNullExpression x) return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), x.isNot() ? "IS_NOT_NULL" : "IS_NULL", null);
+        if (e instanceof Between x) return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), "BETWEEN", List.of(literal(x.getBetweenExpressionStart().toString()), literal(x.getBetweenExpressionEnd().toString())));
+        if (e instanceof InExpression x) { String text = x.getRightExpression() == null ? "" : x.getRightExpression().toString(); return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), x.isNot() ? "NOT_IN" : "IN", parseList(text)); }
+        if (e instanceof BinaryExpression x) return new MutationPlan.Predicate(resolve(moduleId, x.getLeftExpression().toString()), operator(x), literal(x.getRightExpression().toString()));
         throw new IllegalArgumentException("Unsupported DML WHERE expression: " + e);
     }
 
