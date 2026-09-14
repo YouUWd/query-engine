@@ -51,7 +51,7 @@ public final class MutationExecutor {
 
     private Object insertRoot(DSLContext dsl, SysModule module, List<MutationPlan.Assignment> assignments) {
         Table<?> table = table(name(module.primaryTable()));
-        Map<Field<Object>, Object> values = assignmentMap(assignments);
+        Map<Field<Object>, Object> values = assignmentMap(assignments, module.primaryTable());
         SysModuleField primaryKey = primaryKeyField(module.id());
         boolean explicitPk = primaryKey != null && assignments.stream().anyMatch(a -> a.field().fieldId() == primaryKey.id());
         if (primaryKey == null || explicitPk) {
@@ -65,8 +65,8 @@ public final class MutationExecutor {
     private void insertSecondary(DSLContext dsl, SysModule module, String targetTable,
                                  List<MutationPlan.Assignment> assignments, SysTableRelation relation, Object relationValue) {
         SysModuleField relationField = findField(module, targetTable, relation.joinField());
-        Map<Field<Object>, Object> values = assignmentMap(assignments);
-        Field<Object> fk = field(relationField);
+        Map<Field<Object>, Object> values = assignmentMap(assignments, targetTable);
+        Field<Object> fk = DSL.field(name(targetTable, relation.joinField()), Object.class);
         Object existing = values.get(fk);
         if (existing != null && !Objects.equals(existing, relationValue))
             throw new IllegalArgumentException("Explicit 1:1 relation value conflicts with root relation for " + targetTable + "." + relation.joinField());
@@ -79,7 +79,7 @@ public final class MutationExecutor {
             dsl.insertInto(table).set(values).execute();
             return;
         }
-        dsl.insertInto(table).set(values).returning(DSL.field(name(targetTable, primaryKey.columnName()), Object.class)).fetchOne(DSL.field(name(targetTable, primaryKey.columnName()), Object.class));
+        dsl.insertInto(table).set(values).returning(field(primaryKey)).fetchOne(field(primaryKey));
     }
 
     private Object relationValue(SysModule module, List<MutationPlan.Assignment> root, Object rootKey, String mainField) {
@@ -98,7 +98,7 @@ public final class MutationExecutor {
         if (!groups.isEmpty() && whereTouchesNonPrimaryTable(plan.where(), module))
             throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
 
-        int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), condition(plan.where()));
+        int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), primaryCondition(plan.where(), module));
         if (root != null && !root.isEmpty()) updateTable(dsl, module.primaryTable(), root, plan.where());
 
         for (List<MutationPlan.Assignment> secondary : groups.values()) {
@@ -106,14 +106,20 @@ public final class MutationExecutor {
             SysTableRelation relation = oneToOneDirectRelation(module, targetTable);
             Field<Object> targetJoin = DSL.field(name(targetTable, relation.joinField()), Object.class);
             Field<Object> rootJoin = DSL.field(name(module.primaryTable(), relation.mainField()), Object.class);
-            Select<Record1<Object>> matching = dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(condition(plan.where()));
-            dsl.update(table(name(targetTable))).set(assignmentMap(secondary)).where(targetJoin.in(matching)).execute();
+            Select<Record1<Object>> matching = dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(primaryCondition(plan.where(), module));
+            dsl.update(table(name(targetTable))).set(assignmentMap(secondary, targetTable)).where(targetJoin.in(matching)).execute();
         }
         return logicalRows;
     }
 
+    private Condition primaryCondition(MutationPlan.Where where, SysModule module) {
+        if (whereTouchesNonPrimaryTable(where, module))
+            throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
+        return condition(where);
+    }
+
     private int updateTable(DSLContext dsl, String targetTable, List<MutationPlan.Assignment> assignments, MutationPlan.Where where) {
-        return dsl.update(table(name(targetTable))).set(assignmentMap(assignments)).where(condition(where)).execute();
+        return dsl.update(table(name(targetTable))).set(assignmentMap(assignments, targetTable)).where(condition(where)).execute();
     }
 
     private int delete(DSLContext dsl, MutationPlan plan) {
@@ -158,9 +164,12 @@ public final class MutationExecutor {
         return false;
     }
 
-    private Map<Field<Object>, Object> assignmentMap(List<MutationPlan.Assignment> assignments) {
+    private Map<Field<Object>, Object> assignmentMap(List<MutationPlan.Assignment> assignments, String targetTable) {
         Map<Field<Object>, Object> values = new LinkedHashMap<>();
-        for (MutationPlan.Assignment a : assignments) values.put(field(registry.field(a.field().fieldId())), a.value());
+        for (MutationPlan.Assignment a : assignments) {
+            SysModuleField meta = registry.field(a.field().fieldId());
+            values.put(DSL.field(name(targetTable, meta.columnName()), Object.class), a.value());
+        }
         return values;
     }
 
