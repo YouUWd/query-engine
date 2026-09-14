@@ -51,10 +51,15 @@ public final class MutationExecutor {
     }
 
     private Condition condition(MutationPlan.Where where) {
-        if (where == null || where.predicates().isEmpty()) return trueCondition();
-        Condition result = trueCondition();
-        for (MutationPlan.Predicate p : where.predicates()) result = result.and(predicate(p));
-        return result;
+        if (where == null || where.expression() == null) return trueCondition();
+        return condition(where.expression());
+    }
+
+    private Condition condition(MutationPlan.Expression expression) {
+        if (expression instanceof MutationPlan.PredicateExpression p) return predicate(p.predicate());
+        if (expression instanceof MutationPlan.And a) return condition(a.left()).and(condition(a.right()));
+        if (expression instanceof MutationPlan.Or o) return condition(o.left()).or(condition(o.right()));
+        throw new IllegalArgumentException("Unsupported mutation expression: " + expression);
     }
 
     @SuppressWarnings("unchecked")
