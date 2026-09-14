@@ -103,13 +103,17 @@ public final class MutationExecutor {
         Map<String, List<MutationPlan.Assignment>> groups = assignmentsByTable(plan);
         if (groups.isEmpty()) throw new IllegalArgumentException("UPDATE has no assignments");
 
+        // Scalar UPDATE always targets one logical root row set. Its WHERE is
+        // therefore evaluated in the root module's primary-table scope. A
+        // predicate from a secondary physical table is not a join predicate and
+        // must not be rendered against the root table. Reject it before any
+        // count/update SQL is sent to the database. This is intentionally
+        // independent of the assignment set: a primary-only UPDATE with a
+        // secondary predicate is equally invalid.
+        validatePrimaryWhere(plan.where(), module);
+
         List<MutationPlan.Assignment> root = groups.remove(key(module.primaryTable()));
         boolean hasSecondaryAssignments = !groups.isEmpty();
-
-        // Validate the mutation boundary before rendering/executing ANY SQL. A
-        // secondary-table predicate cannot be evaluated against the root table
-        // directly; aggregate mutation is the explicit cross-table write path.
-        if (hasSecondaryAssignments) validatePrimaryWhere(plan.where(), module);
 
         Condition rootCondition = condition(plan.where());
         int logicalRows = dsl.fetchCount(table(name(module.primaryTable())), rootCondition);
