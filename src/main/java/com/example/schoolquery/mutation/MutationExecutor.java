@@ -34,25 +34,24 @@ public final class MutationExecutor {
         if(!groups.isEmpty())validatePrimaryWhere(plan.where(),module);
         Condition rootCondition=condition(plan.where());
         int logicalRows=dsl.fetchCount(table(name(module.primaryTable())),rootCondition);
-
-        // Secondary 1:1 updates are correlated to the root row set. Keeping the
-        // relation comparison column-to-column avoids JDBC key type inference, and
-        // evaluating it before the root UPDATE preserves the original key set.
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
             Field<Object> rootJoin=DSL.field(name(module.primaryTable(),relation.mainField()),Object.class);
+            List<Object> matching=dsl.select(rootJoin).from(table(name(module.primaryTable()))).where(rootCondition).fetch(rootJoin);
+            if(matching.isEmpty())continue;
+            Condition targetCondition=null;
             Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
-            Condition related=exists(selectOne().from(table(name(module.primaryTable())))
-                    .where(rootCondition.and(targetJoin.eq(rootJoin))));
-            dsl.update(table(name(targetTable)))
-                    .set(assignmentMap(secondary,targetTable))
-                    .where(related)
-                    .execute();
+            for(Object value:matching){
+                Condition part=value==null?targetJoin.isNull():typedTargetField(targetTable,relation.joinField(),value).eq(value);
+                targetCondition=targetCondition==null?part:targetCondition.or(part);
+            }
+            dsl.update(table(name(targetTable))).set(assignmentMap(secondary,targetTable)).where(targetCondition).execute();
         }
         if(root!=null&&!root.isEmpty())updateTable(dsl,module.primaryTable(),root,plan.where());
         return logicalRows;
     }
+    private Field typedTargetField(String table,String column,Object value){return DSL.field(name(table,column),value.getClass());}
     private void validatePrimaryWhere(MutationPlan.Where where,SysModule module){if(where==null||where.expression()==null)return;validatePrimaryWhere(where.expression(),module);}
     private void validatePrimaryWhere(MutationPlan.Expression expression,SysModule module){
         if(expression instanceof MutationPlan.PredicateExpression p){
