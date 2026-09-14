@@ -1,9 +1,13 @@
 package com.example.schoolquery.engine;
 
 import com.example.schoolquery.metadata.MetadataRegistry;
+import com.example.schoolquery.mutation.AggregateMutation;
+import com.example.schoolquery.mutation.AggregateMutationExecutor;
+import com.example.schoolquery.mutation.AggregateMutationResult;
 import com.example.schoolquery.mutation.MutationCompiler;
 import com.example.schoolquery.mutation.MutationExecutor;
 import com.example.schoolquery.mutation.MutationPlan;
+import com.example.schoolquery.relation.RelationResolver;
 import com.example.schoolquery.service.PagedFieldDrivenQueryService;
 import org.jooq.DSLContext;
 import java.util.ArrayList;
@@ -17,6 +21,7 @@ public final class DefaultModuleSqlEngine implements ModuleSqlEngine {
     private final QueryPlanExecutor queryExecutor;
     private final MutationCompiler mutationCompiler;
     private final MutationExecutor mutationExecutor;
+    private final AggregateMutationExecutor aggregateExecutor;
 
     public DefaultModuleSqlEngine(MetadataRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -24,6 +29,7 @@ public final class DefaultModuleSqlEngine implements ModuleSqlEngine {
         this.queryExecutor = new QueryPlanExecutor(registry);
         this.mutationCompiler = new MutationCompiler(registry);
         this.mutationExecutor = new MutationExecutor(registry);
+        this.aggregateExecutor = new AggregateMutationExecutor(registry, new RelationResolver(registry));
     }
 
     /** Binary/source compatibility for callers that still construct the legacy paged service. */
@@ -56,5 +62,10 @@ public final class DefaultModuleSqlEngine implements ModuleSqlEngine {
         MutationPlan plan = mutationCompiler.compile(sql);
         var result = mutationExecutor.executeWithResult(dsl, plan);
         return new ModuleUpdateResult(result.affectedRows(), result.generatedKeys());
+    }
+
+    @Override
+    public AggregateMutationResult executeAggregate(DSLContext dsl, AggregateMutation mutation) {
+        return aggregateExecutor.executeWithResult(dsl, mutation);
     }
 }
