@@ -53,12 +53,13 @@ public final class MutationExecutor {
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
             Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
             List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
-            // Bind the actual Java value with DSL.val so the database sees its
-            // concrete type instead of an untyped Object parameter.
+            // Relation keys are already values read from the database. Inline them
+            // through jOOQ's typed literal renderer so H2 does not bind an Object/
+            // OTHER parameter for a numeric FK comparison.
             for(Object value:matching){
                 dsl.update(table(name(targetTable)))
                         .set(assignmentMap(secondary,targetTable))
-                        .where(targetJoin.eq(DSL.val(value)))
+                        .where(targetJoin.eq(DSL.inline(value)))
                         .execute();
             }
         }
