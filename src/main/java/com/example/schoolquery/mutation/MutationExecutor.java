@@ -34,10 +34,9 @@ public final class MutationExecutor {
         if(!groups.isEmpty()&&whereTouchesNonPrimaryTable(plan.where(),module))throw new IllegalArgumentException("Scalar cross-table UPDATE WHERE must reference only module primary-table fields; use aggregate mutation for secondary-table predicates");
         Condition rootCondition=primaryCondition(plan.where(),module);
 
-        // Capture the relation keys before changing the root table. This both avoids
-        // database-specific UPDATE/subquery behaviour and keeps secondary-table
-        // updates tied to the original logical root row set when the primary key
-        // itself is part of the UPDATE assignment.
+        // Capture relation keys before changing the root table. Secondary writes are
+        // therefore based on the original logical root row set, even if the UPDATE
+        // itself changes the primary key.
         Map<String,List<Object>> secondaryKeys=new LinkedHashMap<>();
         for(List<MutationPlan.Assignment> secondary:groups.values()){
             String targetTable=tableOf(secondary);
@@ -54,13 +53,12 @@ public final class MutationExecutor {
             SysTableRelation relation=oneToOneDirectRelation(module,targetTable);
             Field<Object> targetJoin=DSL.field(name(targetTable,relation.joinField()),Object.class);
             List<Object> matching=secondaryKeys.getOrDefault(key(targetTable),List.of());
-            // Use one equality predicate per 1:1 root key instead of relying on a
-            // dialect-specific rendering of Field.in(Collection) with Object-typed
-            // fields. This is deliberately small (1:1) and robust across dialects.
+            // Bind the actual Java value with DSL.val so the database sees its
+            // concrete type instead of an untyped Object parameter.
             for(Object value:matching){
                 dsl.update(table(name(targetTable)))
                         .set(assignmentMap(secondary,targetTable))
-                        .where(targetJoin.eq(value))
+                        .where(targetJoin.eq(DSL.val(value)))
                         .execute();
             }
         }
