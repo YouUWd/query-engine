@@ -38,7 +38,7 @@ public final class ModuleQueryCompiler {
             if ("*".equals(projection.expression())) {
                 for (LogicalFieldRef ref : allVisible(root.id())) {
                     projections.add(ref);
-                    aliases.add(uniqueDefaultAlias(registry.field(ref.fieldId()).columnName(), usedAliases, explicitAliases));
+                    aliases.add(defaultAlias(ref, usedAliases, explicitAliases));
                 }
             } else {
                 LogicalFieldRef ref = resolve(root.id(), projection.expression());
@@ -47,7 +47,7 @@ public final class ModuleQueryCompiler {
                     aliases.add(projection.alias());
                     usedAliases.add(projection.alias().toLowerCase(Locale.ROOT));
                 } else {
-                    aliases.add(uniqueDefaultAlias(registry.field(ref.fieldId()).columnName(), usedAliases, explicitAliases));
+                    aliases.add(defaultAlias(ref, usedAliases, explicitAliases));
                 }
             }
         }
@@ -67,12 +67,17 @@ public final class ModuleQueryCompiler {
         return new QueryPlan(root.id(), projections, List.of(), flat, expr, new SortPlan(sorts), page, aliases);
     }
 
-    private String uniqueDefaultAlias(String base, Set<String> used, Set<String> explicitAliases) {
-        String candidate = base;
-        int suffix = 2;
-        while (used.contains(candidate.toLowerCase(Locale.ROOT)) || explicitAliases.contains(candidate.toLowerCase(Locale.ROOT)))
-            candidate = base + "_" + suffix++;
-        used.add(candidate.toLowerCase(Locale.ROOT));
+    /**
+     * Default output aliases are logical-field identifiers, which are globally unique.
+     * This deliberately avoids physical column names because different FieldIds may map
+     * to the same table.column while still representing different logical fields.
+     */
+    private String defaultAlias(LogicalFieldRef ref, Set<String> used, Set<String> explicitAliases) {
+        String candidate = "f" + ref.fieldId();
+        String normalized = candidate.toLowerCase(Locale.ROOT);
+        if (used.contains(normalized) || explicitAliases.contains(normalized))
+            throw new IllegalArgumentException("Projection alias conflicts with logical field alias: " + candidate);
+        used.add(normalized);
         return candidate;
     }
 
