@@ -37,8 +37,7 @@ public final class AggregateMutationExecutor {
 
     private void validateFullSyncScope(AggregateMutation m, SysModule module) {
         if (m.saveMode() != AggregateMutation.SaveMode.FULL_SYNC || !m.orphanRemoval()) return;
-        Set<Long> declared = m.fullSyncChildModules();
-        for (long childModuleId : declared) {
+        for (long childModuleId : m.fullSyncChildModules()) {
             SysModule child = registry.module(childModuleId);
             if (!registry.children(module.id()).stream().anyMatch(x -> x.id() == child.id()))
                 throw new IllegalArgumentException("FULL_SYNC child module " + childModuleId + " is not a direct child of module " + module.id());
@@ -86,8 +85,24 @@ public final class AggregateMutationExecutor {
         Object key = values.get(pk);
         if (key == null) key = parentKey;
         if (key == null) throw new IllegalArgumentException("Aggregate DELETE requires primary key for module " + module.id());
+        return deleteByKey(dsl, module, key);
+    }
+
+    /** Delete a logical node bottom-up, including descendants not explicitly represented in the mutation payload. */
+    private int deleteByKey(DSLContext dsl, SysModule module, Object key) {
         int count = 0;
-        for (AggregateMutation child : m.children()) count += apply(dsl, child, module, key);
+        for (SysModule child : registry.children(module.id())) {
+            if (child.isVirtual() || child.primaryTable().equalsIgnoreCase(module.primaryTable())) continue;
+            SysTableRelation rel = relations.parentChildRelation(module, child);
+            if (rel == null) throw new IllegalArgumentException("No physical parent-child relation for modules " + module.id() + " -> " + child.id());
+            SysModuleField childPk = primaryKeyField(child);
+            SysModuleField childFk = findColumn(child, rel.joinField());
+            if (childPk == null) throw new IllegalArgumentException("Aggregate child module " + child.id() + " has no primary key field");
+            List<Object> childKeys = dsl.select(field(childPk)).from(table(name(child.primaryTable())))
+                    .where(field(childFk).eq(key)).fetch(field(childPk));
+            for (Object childKey : childKeys) count += deleteByKey(dsl, child, childKey);
+        }
+        SysModuleField pk = primaryKeyField(module);
         count += dsl.deleteFrom(table(name(module.primaryTable()))).where(field(pk).eq(key)).execute();
         return count;
     }
@@ -111,7 +126,7 @@ public final class AggregateMutationExecutor {
         for (long childModuleId : scopes) {
             List<AggregateMutation> mutations = byModule.getOrDefault(childModuleId, List.of());
             SysModule child = registry.module(childModuleId);
-            if (child.primaryTable().equals(parent.primaryTable())) continue;
+            if (child.primaryTable().equalsIgnoreCase(parent.primaryTable())) continue;
             SysTableRelation rel = relations.parentChildRelation(parent, child);
             if (rel == null) throw new IllegalArgumentException("No physical parent-child relation for modules " + parent.id() + " -> " + child.id());
             SysModuleField fk = findColumn(child, rel.joinField());
@@ -123,9 +138,9 @@ public final class AggregateMutationExecutor {
                 Object childKey = values(child, mutation.values()).get(pk);
                 if (childKey != null) keep.add(childKey);
             }
-            Condition condition = field(fk).eq(parentKey);
-            if (!keep.isEmpty()) condition = condition.and(field(pk).notIn(keep));
-            count += dsl.deleteFrom(table(name(child.primaryTable()))).where(condition).execute();
+            List<Object> orphanKeys = dsl.select(field(pk)).from(table(name(child.primaryTable())))
+                    .where(field(fk).eq(parentKey).and(field(pk).notIn(keep))).fetch(field(pk));
+            for (Object orphanKey : orphanKeys) count += deleteByKey(dsl, child, orphanKey);
         }
         return count;
     }
